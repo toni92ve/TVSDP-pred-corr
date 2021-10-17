@@ -256,7 +256,7 @@ class _Constraints:
     def compute(self,
                  A1: np.ndarray, A2: np.ndarray,
                  b: np.ndarray,
-                 Y: np.ndarray) -> (np.ndarray, np.ndarray):
+                 Y: np.ndarray):
          
         n, m, rank = self._n, self._m, self._rank
 
@@ -435,7 +435,7 @@ class PredictorCorrector:
                  
 def _SolveQP(n: int, m:int, rank: int, P: np.ndarray, q: np.ndarray,
              C: sparse.csc_matrix, d: np.ndarray, 
-             dY: np.ndarray, lam: np.ndarray) -> (bool, float):
+             dY: np.ndarray, lam: np.ndarray):
     """ Solves QP problem using CVXPY library. """
      
     # Define and solve the CVXPY problem.
@@ -466,7 +466,7 @@ def _SolveQP(n: int, m:int, rank: int, P: np.ndarray, q: np.ndarray,
 
 def _SolveQP_NSpace(n: int, m:int, rank: int, P: np.ndarray, q: np.ndarray,
                     C: sparse.csc_matrix, d: np.ndarray, Y_0: np.ndarray,
-                    dY: np.ndarray, lam: np.ndarray) -> (bool,float): 
+                    dY: np.ndarray, lam: np.ndarray): 
     
     start_time = time.time() 
 
