@@ -26,12 +26,20 @@ A_lin = np.array([Z,Z,Z], dtype=np.float64)
 b0 = np.array([1., 1., 1.])  
 b_lin = np.array([1., 1., 1.])  
 
-
 Y_0 = np.array([[1,0],[1,0],[1,0]], dtype=np.float64)
 eta = 1. + pen_coef/2
 lam_0 = np.array([-eta,-eta,-eta]) 
+
+# sq= 1/np.sqrt(2)
+# R1=np.array([[sq,sq],[-sq,sq]])
+# Y_0 = np.matmul(Y_0,R1) 
+# print(Y_0)
+# pen_coef = float(params["problem"]["pen_coef"])
  
-predcorr = pc.PredictorCorrector(n=n, m=m, rank=rank, params=params)
+# eta = 1. + pen_coef/2
+# lam_0 = np.array([-eta,-eta,-eta]) 
+
+predcorr = pc._PredictorCorrector(n=n, m=m, rank=rank, params=params)
  
 predcorr.run(A0, A_lin, b0, b_lin, Y_0, lam_0)
 visualize_sol(params=params)

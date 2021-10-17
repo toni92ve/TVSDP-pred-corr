@@ -37,7 +37,7 @@ lam_x = -(3+2*pen_coef)/(4+2*pen_coef)
 lam_y = -(1+pen_coef) 
 lam_0 = np.array([lam_x , 0., 0., lam_y]) 
  
-predcorr = pc.PredictorCorrector(n=n, m=m, rank=rank, params=getParameters(print_par=False))
+predcorr = pc._PredictorCorrector(n=n, m=m, rank=rank, params=getParameters(print_par=False))
  
 predcorr.run(A0, A_lin, b0, b_lin, Y_0, lam_0)
 visualize_sol(params=getParameters(print_par=False))

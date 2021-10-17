@@ -46,7 +46,7 @@ Y_0 = np.array([[1,0],[1,0],[1,0],[1,0]], dtype=np.float64)
 l = 1/3
 lam_0 = np.array([l,l,l,l,l,l]) 
  
-predcorr = pc.PredictorCorrector(n=n, m=m, rank=rank, params=getParameters(print_par=False))
+predcorr = pc._PredictorCorrector(n=n, m=m, rank=rank, params=getParameters(print_par=False))
 
 predcorr.run(b, A, Y_0, lam_0)   
  

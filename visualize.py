@@ -1,6 +1,4 @@
 import pickle
-import glob
-import scipy.linalg
 import numpy as np 
 import os
 
@@ -33,8 +31,8 @@ def visualize_sol(params):
         print("Y=\n",res[0],"\n")
         print("X=\n",res[1],"\n")
         print("lambda=\n",res[2],"\n") 
-        print("residual: ", res[3])
         print("residual threshold: ", res_tol)
+        print("residual: ", res[3])
         print("============================================")
         f.close()
     for f in dirListing:

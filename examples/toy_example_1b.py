@@ -34,7 +34,7 @@ lam_x = -0.25*eta
 lam_y = -0.625*eta
 lam_0 = np.array([lam_x,lam_y,lam_x]) 
  
-predcorr = pc.PredictorCorrector(n=n, m=m, rank=rank, params=getParameters(print_par=False))
+predcorr = pc._PredictorCorrector(n=n, m=m, rank=rank, params=getParameters(print_par=False))
  
 predcorr.run(A0, A_lin, b0, b_lin, Y_0, lam_0)
 visualize_sol(params=getParameters(print_par=False))

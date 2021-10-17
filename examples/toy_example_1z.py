@@ -23,7 +23,7 @@ y2 = (np.sqrt(2)-np.sqrt(6))/4
 Y_0 = np.array([[1,1],[0,0],[y1,y2]], dtype=np.float64)
 lam_0 = np.array([-1.,0.,-1.]) 
  
-predcorr = pc.PredictorCorrector(n=n, m=m, rank=rank, params=getParameters(print_par=False))
+predcorr = pc._PredictorCorrector(n=n, m=m, rank=rank, params=getParameters(print_par=False))
  
 predcorr.run(A0, A_lin, b0, b_lin, Y_0, lam_0)
 visualize_sol(params=getParameters(print_par=False))

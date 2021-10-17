@@ -1,428 +1,279 @@
-import numpy as np
-from scipy.sparse import csc_matrix
-import osqp, time
+from operator import matmul
+from cvxpy.reductions import reduction 
+from numpy.core.fromnumeric import size
+import osqp
+import time
+import pickle
+import numpy as np 
+import cvxpy as cp
+import cvxpy.error as cp_error
+import scipy  
+from parameters import getParameters
 
-_STATUSES = {
-    osqp.constant("OSQP_SOLVED")                      : "solved",
-    osqp.constant("OSQP_SOLVED_INACCURATE")           : "solved inaccurate",
-    osqp.constant("OSQP_MAX_ITER_REACHED")            : "maximum iterations reached",
-    osqp.constant("OSQP_PRIMAL_INFEASIBLE")           : "primal infeasible",
-    osqp.constant("OSQP_PRIMAL_INFEASIBLE_INACCURATE"): "primal infeasible inaccurate",
-    osqp.constant("OSQP_DUAL_INFEASIBLE")             : "dual infeasible",
-    osqp.constant("OSQP_DUAL_INFEASIBLE_INACCURATE")  : "dual infeasible inaccurate",
-    # osqp.constant("OSQP_SIGINT")                      : "interrupted by user",
-    osqp.constant("OSQP_TIME_LIMIT_REACHED")          : "run time limit reached",
-    osqp.constant("OSQP_UNSOLVED")                    : "unsolved",
-    osqp.constant("OSQP_NON_CVX")                     : "problem non convex",
-}
+from scipy import sparse
+from scipy.linalg import null_space 
+from scipy.linalg import svd
+import remove_red as rr
+import os
+import glob
 
-_ACCEPTABLE_STATUSES = {
-    _STATUSES[osqp.constant("OSQP_SOLVED")],
-    _STATUSES[osqp.constant("OSQP_SOLVED_INACCURATE")],
-    _STATUSES[osqp.constant("OSQP_PRIMAL_INFEASIBLE_INACCURATE")],
-    _STATUSES[osqp.constant("OSQP_DUAL_INFEASIBLE_INACCURATE")]
-}
-
-_FATAL_STATUSES = {
-    _STATUSES[osqp.constant("OSQP_UNSOLVED")],
-    _STATUSES[osqp.constant("OSQP_NON_CVX")],
-}
-
+np.set_printoptions(edgeitems=30, linewidth=100000
+    # ,formatter=dict(float=lambda x: "%.5g" % x)
+    )
+ 
 
 def _getInterpolatedMatrix(A1: np.ndarray, A2: np.ndarray,
-                           tau: float, out: np.ndarray) -> np.ndarray:
+                           t: float, out: np.ndarray) -> np.ndarray:
     """
     Returns data matrix linearly interpolated between two timestamps t and t+1:
-    out = A1 + tau * (A2 - A1)
+    out = A1 + t * (A2 - A1)
     """
     assert isinstance(A1, np.ndarray) and isinstance(A2, np.ndarray)
-    assert isinstance(out, np.ndarray)
+    assert isinstance(out, np.ndarray) 
     assert A1.shape == A2.shape == out.shape
-    assert 0.0 <= tau <= 1.0
+    # assert 0.0 <= t <= 1.0
+
     np.copyto(out, A2)
     out -= A1
-    out *= tau
+    out *= t
     out += A1
+
     return out
-
-
-def _getM_LmM(M: np.ndarray, lam: np.ndarray, mu: np.ndarray,
-              out: np.ndarray) -> np.ndarray:
-    """
-    Computes: out = M .* (lam - mu).
-    """
-    np.copyto(out, lam)
-    out -= mu
-    out *= M
-    return out
-
 
 def _getYY(Y: np.ndarray, out: np.ndarray) -> np.ndarray:
     """
-    Computes: matrix YY, where YY_{ij} = Y_i * Y_{j+T}^T,
-    0 <= i < T, 0 <= j < N.
+    Computes: matrix YY^T
     """
     assert out.ndim == Y.ndim == 2
-    T, N = out.shape
-    assert Y.shape[0] == T + N and id(out) != id(Y)
+    n, n = out.shape
+    assert Y.shape[0] == n and id(out) != id(Y) 
 
-    L = Y[: T, :]
-    R = Y[T :, :]
-    np.dot(L, R.T, out=out)             # YY = L * R^T
+    np.dot(Y, Y.T, out=out)             # YY^T 
+    return out.ravel()                  # returned in vectorial form
+
+def _getGradientYY(n: int, rank: int, Y: np.ndarray, out: np.ndarray) -> np.ndarray:
+    """
+    Computes: grad YY^T
+    """ 
+    assert Y.shape == (n,rank) 
+    assert out.shape == (n*n,n*rank)
+    for alpha in range(n*n):
+        for beta in range(n*rank):
+            (i,j) = np.divmod(alpha,n)
+            (h,k) = np.divmod(beta,rank)
+            if i == h:
+                out[alpha,beta] += Y[j,k] 
+            if j == h:
+                out[alpha,beta] += Y[i,k] 
     return out
 
-
-def _getY2_plus_gradYY(M_LmM: np.ndarray, Y: np.ndarray,
-                       out: np.ndarray) -> np.ndarray:
+def _getGradientAYY(n: int, m:int, rank: int, A:np.ndarray, Y: np.ndarray, out: np.ndarray) -> np.ndarray:
     """
-    Computes: 2 * Y + sum(M .* (lam - mu) .* grad(YY)).
-    """
-    assert out.ndim == M_LmM.ndim == 2
-    assert out.shape == Y.shape and id(out) != id(Y)
-    T, N = M_LmM.shape
-    assert Y.shape[0] == T + N
-
-    L = Y[: T, :]
-    R = Y[T :, :]
-    np.dot(M_LmM,   R, out=out[: T, :])
-    np.dot(M_LmM.T, L, out=out[T :, :])  
-    out += Y
-    out += Y
+    Computes: grad <A,YY^T> 
+    """ 
+    for cons_nr in range(m):
+        for i in range(n):
+            for j in range(rank):   
+                out[cons_nr, i*rank+j] = 2 * np.dot(A[cons_nr,i,:],Y[:,j]) 
     return out
 
+def _getLamTimesA(lam: np.ndarray, A: np.ndarray, out: np.ndarray) -> np.ndarray:
+     
+    for i in range(lam.size): 
+        out +=  lam[i] * A[i,:,:] 
+    return out
+
+def _getLinear(n: np.int, rank: np.int, Y: np.ndarray, gradYY: np.ndarray, lamTimesA: np.ndarray, penalty: np.float,
+                out: np.ndarray) -> np.ndarray:
+
+    np.matmul(gradYY, lamTimesA, out=out) 
+    for i in range(n):
+        for j in range(rank):
+                out[j+i*rank] += 2 * (1+(j+1)*penalty/rank)* Y[i,j]
+
+    return out
 
 class _AccuracyCriterion:
-    def __init__(self, T: int, N: int, rank: int):
+
+    def __init__(self, n: int, m: int, rank: int):
         """
         Constructor pre-allocates caches for the temporary variables.
         """
-        assert isinstance(T, int) and isinstance(N, int)
-        assert isinstance(rank, int) and 0 < rank <= T <= N
+        assert isinstance(n, int)
+        assert isinstance(rank, int) and 0 < rank <= n
 
-        self._tmp1 = np.full((T + N, rank), fill_value=0.0)
-        self._tmp2 = np.full((T, N), fill_value=0.0)
-        self._tmp3 = np.full((T, N), fill_value=0.0)
+        self._grad_AYY = np.full((m, n*rank), fill_value=0.0)
+        self._YY = np.full((n, n), fill_value=0.0)
+        self.constr_err = np.full((m, ), fill_value=0.0)
+        self.lagran_grad = np.zeros((n*rank,))
 
-    def residual(self, D: np.ndarray, M: np.ndarray, Y: np.ndarray,
-                 lam: np.ndarray, mu: np.ndarray, delta: float) -> float:
+    def residual(self, n: int, m:int, rank:int, b: np.ndarray, A: np.ndarray, Y: np.ndarray,
+                 lam: np.ndarray, penalty: np.float) -> float:
         """
         Computes the residual.
         """
-        assert Y.shape == self._tmp1.shape
-        assert D.shape == M.shape == lam.shape == mu.shape
-        assert D.shape == self._tmp2.shape == self._tmp3.shape
-
-        # Compute residual A.
-        M_LmM = _getM_LmM(M=M, lam=lam, mu=mu, out=self._tmp2)
-        res = _getY2_plus_gradYY(M_LmM=M_LmM, Y=Y, out=self._tmp1)
-        resA = np.linalg.norm(res.ravel(), np.inf)
-
-        # Compute residual B.
-        diff = _getYY(Y=Y, out=self._tmp2)
-        diff -= D
-        diff -= delta                                   # Q = +YY - delta - D
-        res = np.minimum(lam, diff, out=self._tmp3)
-        res *= M
-        resB = np.linalg.norm(res.ravel(), np.inf)
-
-        # Compute residual C.
-        np.negative(diff, out=diff)
-        diff -= 2.0 * delta                             # Q = -YY - delta + D
-        res = np.minimum(mu, diff, out=self._tmp3)
-        res *= M
-        resC = np.linalg.norm(res.ravel(), np.inf)
-
-        return max(resA, resB, resC)
-
+        # print("Inside the residual: ")
+        # Compute Lagrangian residual
+        # print(Y, lam, A, b)
+        _getGradientAYY(n, m, rank, A, Y, self._grad_AYY)  
+        # print("self._grad_AYY\n", self._grad_AYY)
+        # print("times lam", np.matmul(lam, self._grad_AYY))
+        # print(self.lagran_grad.ravel())
+        for i in range(n):
+            for j in range(rank):
+                self.lagran_grad[j+i*rank] += 2 * (1+(j+1)*penalty/rank)* Y[i,j]
+        # print(self.lagran_grad.ravel())
+        self.lagran_grad += np.matmul(lam, self._grad_AYY) 
+        # print(self.lagran_grad.ravel())
+        resA = np.linalg.norm(self.lagran_grad.ravel(), np.inf)
+        # print("resA",resA)
+        # Compute constraints residual
+        _getYY(Y=Y, out=self._YY)
+        np.copyto(self.constr_err, -b)
+        for i in range(m):   
+            self.constr_err[i] += np.dot(self._YY.ravel(), A[i,:,:].ravel())  
+        resB = np.linalg.norm(self.constr_err, np.inf)
+        # print("resB",resB)
+        return max(resA, resB)
 
 class _LinearTerm:
-    
-    def __init__(self, T: int, N: int, rank: int):
+
+    def __init__(self, n: int, m: int, rank: int):
         """
         Constructor pre-allocates caches for the temporary variables.
         """
-        assert isinstance(T, int) and isinstance(N, int)
-        assert isinstance(rank, int) and 0 < rank <= T <= N
+        assert isinstance(n, int)
+        assert isinstance(rank, int) and 0 < rank <= n
 
-        self._q = np.full((T + N, rank), fill_value=0.0)
-        self._M_LmM = np.full((T, N), fill_value=0.0)
-        self._diffM = np.full((T, N), fill_value=0.0)
+        self.n = n
+        self.rank = rank
 
-    def compute(self, M1: np.ndarray, M2: np.ndarray,
-                Y: np.ndarray, lam: np.ndarray, mu: np.ndarray) -> np.ndarray:
+        self._diffA = np.full((m,n,n), fill_value=0.0)
+        self._lamTimesA = np.full((n,n), fill_value=0.0)
+        self._gradYY = np.full((n*n,n*rank), fill_value=0.0)
+        self._q = np.full((n*rank,), fill_value=0.0)
+
+    def compute(self, A1: np.ndarray, A2: np.ndarray, 
+                Y: np.ndarray, lam: np.ndarray, penalty: np.float) -> np.ndarray:
         """
         Computes the linear term of objective function in QP problem.
         """
-        assert M1.shape == M2.shape == lam.shape == mu.shape
-        assert M1.shape == self._M_LmM.shape == self._diffM.shape
-        assert Y.shape == self._q.shape
+        assert A1.shape == A2.shape 
+        assert Y.ravel().shape == self._q.shape
 
-        np.copyto(self._diffM, M2)
-        self._diffM -= M1                       # diffM = M2 - M1
-        _getM_LmM(M=self._diffM, lam=lam, mu=mu, out=self._M_LmM)
-        _getY2_plus_gradYY(M_LmM=self._M_LmM, Y=Y, out=self._q)
+        np.copyto(self._diffA, A2)
+        self._diffA -= A1                       # diffA = A2 - A1
+        
+        _getLamTimesA(lam=lam, A=self._diffA, out=self._lamTimesA)
+        _getGradientYY(n=self.n, rank=self.rank, Y=Y, out=self._gradYY)
+        _getLinear(n=self.n, rank=self.rank,Y=Y, gradYY=self._gradYY.T ,lamTimesA=self._lamTimesA.ravel(), penalty = penalty, out=self._q)
         return self._q.ravel()
-
-
+ 
 class _QuadraticTerm:
-    def __init__(self, T: int, N: int, rank: int):
-        """
-        Constructor pre-allocates and pre-computes persistent data structures.
-        N O T E: OSQP solver needs only upper triangular part of the quadratic
-        term matrix, thus, we skip the lower one.
-        For more readable formulation see the file: test_quadratic_term.py.
-        """
-        assert isinstance(T, int) and isinstance(N, int)
-        assert isinstance(rank, int) and 0 < rank <= T <= N
 
-        noff = T * N * rank     # number of off-diagonal elements (upper)
-        nvars = (T + N) * rank  # number of variables in matrix Y
-        nnz = noff + nvars      # total number of non-zeros (diagonal + upper)
+    def __init__(self, n: int, rank: int):
 
-        self._nvars = nvars
-        self._nnz = nnz
+        assert isinstance(n, int)
+        assert isinstance(rank, int) and 0 < rank <= n
+
+        self._n = n
         self._rank = rank
+        self._nvars = n*rank 
 
-        # Allocate caches and index arrays of indices.
-        self._tmp = np.full((T, N), fill_value=0.0)
-        self._row = np.full((nnz,), fill_value=0, dtype=np.int)
-        self._col = np.full((nnz,), fill_value=0, dtype=np.int)
-        self._val = np.full((nnz,), fill_value=0.0)
-
-        # Indices of variables in matrix Y.
-        idx = np.arange(nvars, dtype=np.int).reshape(n, rank)
-
-        # Add indices of off-diagonal elements (upper triangular submatrix).
-        np.copyto(self._row[: noff].reshape(T * N, rank), np.repeat(idx[: T, :], repeats=N, axis=0))
-        np.copyto(self._col[: noff].reshape(T * N, rank),
-                  np.tile(idx[T : T + N, :], (T, 1)))
-
-        # Add indices of diagonal elements.
-        np.copyto(self._row[noff :], np.arange(nvars, dtype=np.int))
-        np.copyto(self._col[noff :], self._row[noff :])
-
-        # The diagonal elements of the matrix never changes.
-        self._val[noff :].fill(2.0)
-
-    def assemble(self, M: np.ndarray,
-                 lam: np.ndarray, mu: np.ndarray) -> csc_matrix:
+    def compute(self, A: np.ndarray, lam: np.ndarray, penalty: np.float) -> np.ndarray:
         """
         Assembles a sparse, quadratic term matrix given current state.
-        """
-        assert M.shape == lam.shape == mu.shape == self._tmp.shape
-        T, N = M.shape
-        nvars, rank = self._nvars, self._rank
+        """  
+        n = self._n
+        rank = self._rank
+        nvars = n*rank
+        
+        _P = np.full((self._nvars,self._nvars), fill_value=0.0)
 
-        # Modify values of off-diagonal elements. Diagonal ones remain the same.
-        np.copyto(self._val[: T * N * rank].reshape((T * N, rank)),
-                  _getM_LmM(M=M, lam=lam, mu=mu, out=self._tmp).reshape(-1, 1))
+        _sum_lam_A = np.full((self._n,self._n), fill_value=0.0)
+        _getLamTimesA(lam, A, out=_sum_lam_A)
 
-        H = csc_matrix((self._val, (self._row, self._col)), shape=(nvars, nvars))
-        assert H.nnz == self._nnz
-        return H
-
-    def get_structure_unittest(self) -> (np.ndarray, np.ndarray, np.ndarray):
-        """
-        Get values, row and column indices for unittest.
-        """
-        return self._val, self._row, self._col
-
+        for alpha in range(nvars):
+            for beta in range(nvars):
+                (i,j) = np.divmod(alpha,rank)
+                (h,k) = np.divmod(beta,rank)
+                if j == k:
+                    _P[alpha,beta] += 2*_sum_lam_A[i,h]
+                    if i == h:
+                        _P[alpha,beta] += 2
+                        _P[alpha,beta] += 2*penalty*(j+1)/rank
+         
+        return _P
 
 class _Constraints:
     
-    def __init__(self, T: int, N: int, rank: int):
+    def __init__(self, n: int, m: int, rank: int):
         """
         Constructor pre-allocates and pre-computes persistent data structures.
         For more readable formulation see the file: test_constraints.py.
         """
-        assert isinstance(T, int) and isinstance(N, int)
-        assert isinstance(rank, int) and 0 < rank <= T <= N
+        assert isinstance(n, int) and isinstance(m, int)
+        assert isinstance(rank, int) and 0 < rank <= n
 
-        self._T = T
-        self._N = N
+        self._n = n
+        self._m = m
         self._rank = rank
-        nvars = (T + N) * rank  # number of variables in matrix Y
-        nconstr = T * N         # number of upper OR lower bound constraints
+        nvars = n * rank        # number of variables in matrix Y 
+ 
+        self._A = np.full((m, 2 * rank), fill_value=0.0)
+        self._d = np.full((m,), fill_value=0.0) 
 
-        row = np.full((2, nconstr, 2 * rank), fill_value=0, dtype=np.int)
-        col = np.full((2, nconstr, 2 * rank), fill_value=0, dtype=np.int)
-        vin = np.full((2, nconstr, 2 * rank), fill_value=0, dtype=np.int)
+        self._YY = np.full((n,n), fill_value=0.0)
+        self._C = np.full((m,nvars), fill_value=0.0) 
 
-        # Placeholders for the values of constraint matrix, lower and upper
-        # bounds. We follow the notations adopted for OSQP solver.
-        self._A = np.full((2, nconstr, 2 * rank), fill_value=0.0)
-        self._l = np.full((2, nconstr), fill_value=0.0)
-        self._u = np.full((2, nconstr), fill_value=0.0)
+    def compute(self,
+                 A1: np.ndarray, A2: np.ndarray,
+                 b: np.ndarray,
+                 Y: np.ndarray):
+         
+        n, m, rank = self._n, self._m, self._rank
 
-        # Indices of variables in matrix Y.
-        idx = np.arange(nvars, dtype=np.int).reshape(T + N, rank)
+        # ASSERTIONS 
 
-        # Initialize column indices of constraint matrix A.
-        np.copyto(col[0, :, : rank], np.repeat(idx[: T, :], repeats=N, axis=0))
-        np.copyto(col[0, :, rank :], np.tile(idx[T : T + N, :], (T, 1)))
+        _getYY(Y=Y, out=self._YY)
+ 
+        for i in range(m):
+            self._d[i] = b[i]
+            self._d[i] -= np.dot(self._YY.ravel(), A2[i,:,:].ravel())
+         
+        for cons_nr in range(m):
+                for i in range(n):
+                    for j in range(rank):  
+                        self._C[cons_nr, i*rank+j] = 2 * np.dot(A1[cons_nr,i,:],Y[:,j])
+                         
+        return self._C, self._d
 
-        # Initialize positions from where to pull variables Y during
-        # the assembling of constraint matrix A. In this particular problem,
-        # positions can be taken from column indices (mind the sub-ranges).
-        np.copyto(vin[0, :, : rank], col[0, :, rank :])
-        np.copyto(vin[0, :, rank :], col[0, :, : rank])
+class _PredictorCorrector:
 
-        # Initialize row indices. Broadcasting along the last dimension.
-        np.copyto(row, np.arange(2 * nconstr,
-                                 dtype=np.int).reshape((2, nconstr, 1)))
-
-        # Upper ("lambda") and lower ("mu") sub-matrices are similar.
-        np.copyto(col[1, :, :], col[0, :, :])
-        np.copyto(vin[1, :, :], vin[0, :, :])
-
-        self._row = row                 # row indices of constraint matrices
-        self._col = col                 # column indices of constraint matrices
-        self._vin = vin                 # value indices of constraint matrices
-        self._tmp = np.full((T, N), fill_value=0.0)
-
-    def assemble(self,
-                 D1: np.ndarray, D2: np.ndarray,
-                 M1: np.ndarray, M2: np.ndarray,
-                 Y: np.ndarray, lam: np.ndarray, mu: np.ndarray,
-                 delta: float, eta1: float, eta2: float
-                 ) -> (csc_matrix, csc_matrix, np.ndarray, np.ndarray):
-        """ Assembles sparse constraint matrices and vectors given
-            current state. """
-        NEG_INF = -float(np.power(np.finfo(np.float64).max, 0.1).item())
-        T, N, rank = self._T, self._N, self._rank
-        assert D1.shape == D2.shape == M1.shape == M2.shape == (T, N)
-        assert D1.shape == lam.shape == mu.shape and Y.shape == (T + N, rank)
-
-        YY = _getYY(Y=Y, out=self._tmp)
-
-        # Pull the values from the current variables Y, flip the sign of the
-        # left-hand sides of the lower-bound ("mu") constraints, and multiply
-        # by the matrix M at time "tau".
-        np.copyto(self._A.ravel(), Y.ravel()[self._vin.ravel()])
-        np.negative(self._A[1, :, :], out=self._A[1, :, :])
-        self._A[0, :, :] *= M1.reshape(-1, 1)
-        self._A[1, :, :] *= M1.reshape(-1, 1)
-
-        # Initially the left-hand sides of the constraints are unbounded.
-        self._l.fill(NEG_INF)
-
-        # Compute the right-hand sides of the constraints. Note, the entities
-        # there are defined at time "tau + delta tau".
-        self._u.fill(delta)
-        self._u[0, :] += D2.ravel();  self._u[1, :] -= D2.ravel()
-        self._u[0, :] -= YY.ravel();  self._u[1, :] += YY.ravel()
-        self._u[0, :] *= M2.ravel();  self._u[1, :] *= M2.ravel()
-
-        # Positions where strongly-active (SA) condition is met. Note,
-        # data matrix D is taken at time "tau".
-        YY -= D1                        # YY <-- YY - D1
-        lam_sa = np.logical_and(
-            np.isclose(YY, +delta, rtol=0.0, atol=eta1), lam >= eta2).ravel()
-        mu_sa = np.logical_and(
-            np.isclose(YY, -delta, rtol=0.0, atol=eta1),  mu >= eta2).ravel()
-        assert lam_sa.shape == mu_sa.shape and mu_sa.size == T * N
-        assert not np.any(np.logical_and(lam_sa, mu_sa)), \
-            "'lambda' & 'mu' must never take nonzero values simultaneously"
-
-        # Make equality constraints for the strongly active (SA) ones.
-        self._l[0, lam_sa] = self._u[0, lam_sa]
-        self._l[1,  mu_sa] = self._u[1,  mu_sa]
-        
-        # Slightly loose the strict equality. TODO: is that right?
-        # self._l[0, lam_sa] -= 0.1 * eta1;  self._u[0, lam_sa] += 0.1 * eta1
-        # self._l[1,  mu_sa] -= 0.1 * eta1;  self._u[1,  mu_sa] += 0.1 * eta1
-
-        # Assemble constraint matrix.
-        A = csc_matrix((self._A.ravel(), (self._row.ravel(), self._col.ravel())),
-                       shape=(2 * T * N, Y.size))
-
-        return A, self._l.ravel(), self._u.ravel()
-
-    def get_structure_unittest(self) -> (np.ndarray, np.ndarray, np.ndarray):
-        """ Get values, row and column indices for unittest. """
-        return self._A, self._row, self._col
-
-
-def _SolveQP(P: csc_matrix, q: np.ndarray,
-             A: csc_matrix, l: np.ndarray, u: np.ndarray,
-             dY: np.ndarray, lam: np.ndarray, mu: np.ndarray,
-             iter_counter: int,
-             verbose: bool) -> bool:
-    """ Solves QP problem using OSQP library. """
-    T, N = mu.shape
-    rank = dY.shape[1]
-    assert dY.shape[0] == T + N
-    assert P.shape == ((T + N) * rank, (T + N) * rank)
-    assert q.shape == ((T + N) * rank,)
-    assert A.shape == (2 * T * N, (T + N) * rank)
-    assert lam.shape == mu.shape == (T, N)
-
-    # Create an OSQP object, setup workspace and solve the problem.
-    start_time = time.time()
-    prob = osqp.OSQP()
-    prob.setup(P, q, A, l, u, verbose=verbose) #, eps_prim_inf=1.0, eps_dual_inf=1.0, eps_abs=1.0)
-    res = prob.solve()
-    run_time = time.time() - start_time
-
-    # Check status of the solver.
-    ok = True
-    assert isinstance(res.info.status, str)
-    if res.info.status in _ACCEPTABLE_STATUSES:
-        print("QP problem status:", res.info.status)
-        print("#iter: {:d}, obj_val: {:f}, pri_res: {:f}, dua_res: {:f}, "
-              "run_time: {:f}".format(res.info.iter, res.info.obj_val,
-                                      res.info.pri_res, res.info.dua_res,
-                                      run_time))
-    elif res.info.status in _FATAL_STATUSES:
-        raise RuntimeError("QP solver fatally failed with status: {:s}"
-                           .format(res.info.status))
-    else:
-        print("WARNING: QP solver failed with status: {:s}"
-              .format(res.info.status))
-        ok = False
-
-    # Get solution for Y's increment and dual variables.
-    if ok:
-        f = open(f"{iter_counter}.pkl", "wb")
-        pickle.dump(res, f)
-        f.close()
-        np.copyto(dY, res.x.reshape(T + N, rank))
-        np.copyto(lam, res.y[: T * N].reshape(T, N))
-        np.copyto( mu, res.y[T * N :].reshape(T, N))
-    return ok
-
-
-class PredictorCorrector:
-    def __init__(self, N: int, rank: int, params: dict):
+    def __init__(self, n: int, m: int, rank: int, params: dict):
         """ Constructor pre-allocates and pre-computes persistent
-            data structures. """
-        # assert isinstance(T, int) and 
-        assert isinstance(N, int)
-        assert isinstance(rank, int) and isinstance(params, dict)
+            data structures. """ 
 
-        # self._T = T
-        self._N = N
+        self._n = n
+        self._m = m
         self._rank = rank
 
         # Create all necessary modules and pre-allocate the workspace.
-        self._accuracy_crit = _AccuracyCriterion(T=T, N=N, rank=rank)
-        self._lin_term = _LinearTerm(T=T, N=N, rank=rank)
-        self._quad_term = _QuadraticTerm(T=T, N=N, rank=rank)
-        self._constraints = _Constraints(T=T, N=N, rank=rank)
-        self._currD = np.zeros((T, N))
-        self._nextD = np.zeros((T, N))
-        self._currM = np.zeros((T, N))
-        self._nextM = np.zeros((T, N))
-        self._Y = np.zeros((T + N, rank))
-        self._dY = np.zeros((T + N, rank))
-        self._lam = np.zeros((T, N))
-        self._mu = np.zeros((T, N))
-        self._lam_new = np.zeros((T, N))
-        self._mu_new = np.zeros((T, N))
+        self._accuracy_crit =_AccuracyCriterion(n=n, m=m, rank=rank)  
+        self._lin_term = _LinearTerm(n=n, m=m, rank=rank)
+        self._quad_term = _QuadraticTerm(n=n, rank=rank)
+        self._constraints = _Constraints(n=n, m=m, rank=rank)
+        self._currb = np.zeros((m, ))
+        self._nextb = np.zeros((m, ))
+        self._currA = np.zeros((m,n,n))
+        self._nextA = np.zeros((m,n,n))
+        self._Y = np.zeros((n, rank)) 
+        self._lam = np.zeros((m, ))   
+        self._candidate_Y = np.zeros((n, rank))
+        self._candidate_lam = np.zeros((m, )) 
+        self._solution_X = np.zeros((n, n))
 
-        # Parameters. Note, 'delta' can change over time, but 'base_delta'
-        # remains the same. The latter defines the minimum value for the
-        # parameter 'delta'.
+        # Parameters.  
         self._base_delta = float(params["problem"]["delta"])
         self._delta = self._base_delta
         self._delta_expand = float(params["problem"]["delta_expand"])
@@ -431,109 +282,221 @@ class PredictorCorrector:
         self._eta1 = float(params["problem"]["eta1"])
         self._eta2 = float(params["problem"]["eta2"])
         self._gamma1 = float(params["problem"]["gamma1"])
-        self._gamma2 = 1.0 / self._gamma1
+        self._gamma2 = float(params["problem"]["gamma2"])
         self._max_retry_attempts = float(params["problem"]["max_retry_attempts"])
         self._res_tol = float(params["problem"]["res_tol"])
-        self._min_delta_tau = float(params["problem"]["min_delta_tau"])
+        self._pen_coef = float(params["problem"]["pen_coef"])
+        self._min_delta_t = float(params["problem"]["min_delta_t"])
         self._ini_stepsize = float(params["problem"]["ini_stepsize"])
+        self._final_time = float(params["problem"]["final_time"])
+        self._initial_time = float(params["problem"]["initial_time"])
         self._verbose = int(params["verbose"])
 
-
-    def run(self, D1: np.ndarray, D2: np.ndarray,
-                  M1: np.ndarray, M2: np.ndarray,
-                  Y0: np.ndarray, lam: np.ndarray, mu: np.ndarray
-            ) -> (np.ndarray, np.ndarray, np.ndarray):
+    def run(self, A0: np.ndarray, A_lin: np.ndarray, 
+                  b0: np.ndarray, b_lin: np.ndarray,
+                  Y_0: np.ndarray, lam_0: np.ndarray):
         """ Runs the inner loop of predictor-corrector algorithm between
-            timestamps t and t+1. """
-        assert isinstance(D1, np.ndarray) and isinstance(D2, np.ndarray)
-        assert isinstance(M1, np.ndarray) and isinstance(M2, np.ndarray)
-        assert isinstance(mu, np.ndarray) and isinstance(lam, np.ndarray)
-        assert isinstance(Y0, np.ndarray)
+            timestamps t and t+1. """ 
 
-        # Get copies of all problem parameters.
-        delta = self._delta
-        delta_expand = self._delta_expand
-        delta_shrink = self._delta_shrink
-        max_delta_expansions = self._max_delta_expansions
-        eta1 = self._eta1
-        eta2 = self._eta2
+        # Get copies of all problem parameters.  
+        final_time = self._final_time 
+        initial_time = self._initial_time
+
+        n = self._n
+        m = self._m
+        rank = self._rank
+
         gamma1 = self._gamma1
-        gamma2 = self._gamma2
-        max_retry_attempts = self._max_retry_attempts
+        gamma2 = self._gamma2 
         res_tol = self._res_tol
-        min_delta_tau = self._min_delta_tau
-        dtau = self._ini_stepsize
-        verbose = self._verbose
-        assert 0 < min_delta_tau <= dtau <= 1.0
+        pen_coef = self._pen_coef
+        min_delta_t = self._min_delta_t
+        dt = self._ini_stepsize  
+        assert 0 < min_delta_t <= dt <= 1.0 
 
-        np.copyto(self._Y, Y0)
-        np.copyto(self._lam, lam)
-        np.copyto(self._mu, mu)
+        np.copyto(self._Y, Y_0)
+        np.copyto(self._lam, lam_0) 
 
-        attempt = 0
-        tau = 0.0
-        while dtau > np.sqrt(np.finfo(np.float64).eps).item():
-            if verbose >= 1:
-                print("+" if attempt == 0 else "a", end="", flush=True)
+        iteration = 0 
+        reduction_steps = 0
+        
+        curr_time = initial_time
+        next_time = initial_time + dt
+          
+        res_0 = self._accuracy_crit.residual(n=n, m=m, rank=rank, b=b0, A=A0,
+                                            Y=self._Y, lam=self._lam, penalty=pen_coef )
+        f = open(f"results/0.pkl", "wb")  
+        pickle.dump([Y_0,np.matmul(Y_0,Y_0.T),lam_0, res_0, 0.0, 0,0], f)
+        f.close()
 
-            _getInterpolatedMatrix(D1, D2, tau, self._currD)
-            _getInterpolatedMatrix(M1, M2, tau, self._currM)
-            _getInterpolatedMatrix(D1, D2, tau + dtau, self._nextD)
-            _getInterpolatedMatrix(M1, M2, tau + dtau, self._nextM)
+        while curr_time < final_time: 
 
-            q = self._lin_term.compute(M1=self._currM, M2=self._nextM,
-                                       Y=self._Y, lam=self._lam, mu=self._mu)
+            
+             
+            np.copyto(self._currA, A0 + A_lin*curr_time)
+            np.copyto(self._nextA, A0 + A_lin*next_time)
+            np.copyto(self._currb, b0 + b_lin*curr_time) 
+            np.copyto(self._nextb, b0 + b_lin*next_time)  
+             
+            
+            q = self._lin_term.compute(A1=self._currA, A2=self._nextA,
+                                    Y=self._Y, lam=self._lam, penalty = pen_coef)
 
-            P = self._quad_term.assemble(M=self._currM,
-                                         lam=self._lam, mu=self._mu)
+            P = self._quad_term.compute(A=self._currA, lam=self._lam, penalty = pen_coef)  
+              
+            C, d = self._constraints.compute(
+                A1 = self._currA, A2=self._nextA,
+                b = self._nextb, Y=self._Y) 
 
-            # Make 'delta' less tight until a feasible solution has been found.
-            feasible_ok = False
-            for de in range(max_delta_expansions):
-                if de > 0:
-                    print("Retrying QP with increased delta ...")
-                print("delta:", delta)
+            # print("ITERATION", iteration) 
+            # print("current b term \n",  self._currb)  
+            # print("current Y\n", self._Y)
+            # print("current X\n", np.matmul(self._Y,self._Y.T))
+            # print("current lam\n", self._lam)
+            # print("q:\n",q)
+            # print("P:\n",P) 
+            # print("d:\n",d)
+            # print("C:\n",C)
 
-                A, lower, upper = self._constraints.assemble(
-                    D1=self._currD, D2=self._nextD,
-                    M1=self._currM, M2=self._nextM,
-                    Y=self._Y, lam=self._lam, mu=self._mu,
-                    delta=delta, eta1=eta1, eta2=eta2)
+            success, run_time = _SolveQP_NSpace(n=n, m=m, rank=rank, P=P, q=q, C=C, d=d, Y_0=self._Y.ravel(),
+                         dY=self._candidate_Y, lam=self._candidate_lam )
+             
+            # if success: print("QP solved! \n")  
+            self._candidate_Y += self._Y
+             
+            res = self._accuracy_crit.residual(n=n, m=m, rank=rank, b=self._nextb, A=self._nextA,
+                                            Y=self._candidate_Y, lam=self._candidate_lam, penalty=pen_coef)
+            
+            if res>res_tol: 
+                dt *= gamma1
+                next_time = curr_time + dt 
+                reduction_steps += 1 
+                 
+            else:
 
-                if _SolveQP(P=P, q=q, A=A, l=lower, u=upper,
-                            dY=self._dY, lam=self._lam_new, mu=self._mu_new,
-                            iter_counter=de,
-                            verbose=verbose > 0):
-                    feasible_ok = True
-                    break
+                # Update the solution.
+                np.copyto(self._Y, self._candidate_Y)
+                np.copyto(self._lam, self._candidate_lam) 
+                np.copyto(self._solution_X,np.matmul(self._Y,self._Y.T))
 
-                delta = min(delta * delta_expand, 0.5)
-            if not feasible_ok:
-                raise RuntimeError("QP solver cannot find a feasible solution")
+                f = open(f"results/{iteration+1}.pkl", "wb")  
+                pickle.dump([self._Y,self._solution_X,self._lam,res,dt,run_time,reduction_steps], f)
+                f.close() 
+ 
+                # Go to the next iteration. Try to shrink 'delta' a little bit.
+                curr_time += dt
+                iteration += 1
+                reduction_steps = 0
+                dt = min(final_time - curr_time, gamma2 * dt)
+                next_time = curr_time+dt
+                 
+def _SolveQP(n: int, m:int, rank: int, P: np.ndarray, q: np.ndarray,
+             C: sparse.csc_matrix, d: np.ndarray, 
+             dY: np.ndarray, lam: np.ndarray):
+    """ Solves QP problem using CVXPY library. """
+     
+    # Define and solve the CVXPY problem.
+    x = cp.Variable(n*rank ) 
 
-            self._dY += self._Y             # dY <-- Y + dY
-            Y_new = self._dY                # alias to Y + dY
-            res = self._accuracy_crit.residual(D=self._nextD, M=self._nextM,
-                                               Y=Y_new, lam=self._lam_new,
-                                               mu=self._mu_new, delta=delta)
-            if res > res_tol and attempt < max_retry_attempts:
-                dtau = min(max(gamma1 * dtau, min_delta_tau), 1.0 - tau)
-                attempt += 1
-                print("Residual is too high res={:f}, repeating ...".format(res))
-                continue
+    start_time = time.time() 
+    objective = cp.Minimize((1/2)*cp.quad_form(x, P) + q.T @ x)
+     
+    prob = cp.Problem(objective, [C @ x == d])
+    prob.solve(solver=cp.SCS, use_indirect=False)
+    # try:
+    #     res = prob.solve(solver=cp.SCS, use_indirect=False)
+    # except cp_error.DCPError:
+    #     objective = cp.Minimize((1/2)*cp.quad_form(x, P+0.001*cp.diag([1.0]*n*rank)) + q.T @ x)
+    #     prob = cp.Problem(objective, [C @ x == d])
+    #     res = prob.solve(solver=cp.SCS, use_indirect=False)
+    
+    run_time = time.time() - start_time
 
-            # Update the solution.
-            np.copyto(self._Y, Y_new)
-            np.copyto(self._lam, self._lam_new)
-            np.copyto(self._mu, self._mu_new)
+    # Check status of the solver.
+    ok = True 
 
-            # Go to the next iteration. Try to shrink 'delta' a little bit.
-            tau += dtau
-            dtau = min(1.0 - tau, gamma2 * dtau)
-            delta = max(delta * delta_shrink, self._base_delta)
-            attempt = 0
+    # Get solution for Y's increment and dual variables. 
+    np.copyto(dY, x.value.reshape(n, rank))  
+    np.copyto(lam,prob.constraints[0].dual_value) 
+     
+    return ok, run_time
 
-        # Next outer iteration we'll start with modified 'delta'.
-        self._delta = delta
-        return self._Y, self._lam, self._mu
+def _SolveQP_NSpace(n: int, m:int, rank: int, P: np.ndarray, q: np.ndarray,
+                    C: sparse.csc_matrix, d: np.ndarray, Y_0: np.ndarray,
+                    dY: np.ndarray, lam: np.ndarray): 
+    
+    start_time = time.time() 
+
+    "check for redunt constraints" 
+    constr_reduction = False
+     
+    if m > np.linalg.matrix_rank(C):
+        
+        print("Reducing constraints...")
+        constr_reduction = True
+        rem_red = rr._remove_redundancy_svd(C,d) 
+        clean_C = rem_red[0] 
+        clean_d = rem_red[1] 
+        clean_m = np.shape(clean_C)[0]
+
+        redund_cons_index = [] 
+        j = 0
+        for i in range(m):
+            if not np.array_equal(C[i], clean_C[j]): 
+                redund_cons_index = np.append(i,redund_cons_index)
+            else:  j += 1
+            if j >= clean_m: break
+        redund_cons_index = np.flip(redund_cons_index)
+        if not m == clean_m:
+            redund_cons_index = redund_cons_index.astype(int) 
+        
+        C = clean_C
+        d = clean_d
+        m = clean_m
+   
+    "finding the null space and its completion"
+    Q = np.linalg.qr(C.T,'complete')[0]
+    W = Q[:,:m]
+    Z = Q[:,m:]     
+
+    C_W = np.matmul(C, W)
+    h = d - np.matmul(C,Y_0)
+    g = q + np.matmul(P,Y_0)
+    Y_W = np.linalg.solve(C_W, h) 
+     
+    "Solve system for Y_Z" 
+    Z_trans_P = np.matmul(Z.T,P) 
+    Z_trans_P_Z = np.matmul(Z_trans_P,Z)  
+    Z_trans_P_W = np.matmul(Z_trans_P,W)  
+    r_term_1 = -np.matmul(Z_trans_P_W,Y_W)
+    r_term_2 = -np.matmul(Z.T,g)
+    r_term = r_term_1+r_term_2
+     
+    Y_Z = np.linalg.solve(Z_trans_P_Z,r_term)
+
+    "Get the Y step"
+    Y_sol_ns = np.matmul(W,Y_W) + np.matmul(Z,Y_Z)
+    Y_step = Y_sol_ns + Y_0 
+    np.copyto(dY, Y_step.reshape((n,rank)))
+    
+    "Get the lambda step"
+    r_term_3 = g+np.matmul(P,Y_sol_ns)
+    r_term_4 = np.matmul(W.T,r_term_3) 
+    new_lambda = np.linalg.solve(-C_W.T, r_term_4)  
+    
+    "Add 0 as multiplier for the redundant constraints"
+    if constr_reduction == True:
+        for j in redund_cons_index:
+            new_lambda = np.insert(new_lambda,j,0) 
+
+    np.copyto(lam, new_lambda)
+
+    run_time = time.time() - start_time
+
+    return True , run_time
+    
+
+
+
+ 
 
