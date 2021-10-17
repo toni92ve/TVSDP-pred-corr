@@ -9,9 +9,7 @@ class _InitialPoint:
 
         self._A = A
         self._b = b.tolist()
-        self._n = n
-        self._m = m
-        self._rank = rank
+        self._n, self._m,  self._rank = n, m, rank 
         self._A_sparse = [[],[],[]]
         self._X0 = np.ndarray((n,n), dtype=np.float64)
         self._Y0 = np.ndarray((n,rank), dtype=np.float64)
@@ -30,8 +28,8 @@ class _InitialPoint:
         sys.stdout.flush()
 
     def _get_SDP_solution(self, X0: np.ndarray, lam0: np.ndarray):
-        n = self._n
-        m = self._m
+
+        n, m = self._n, self._m 
 
         self._sparsify()
         # Make mosek environment
@@ -40,21 +38,18 @@ class _InitialPoint:
 
             # Create a task object and attach log stream printer
             with env.Task(0, 0) as task:
+
                 task.set_Stream(mosek.streamtype.log, self._streamprinter)
                 
                 # Trace objective
-                barci = list(range(0,n))
-                barcj = list(range(0,n))
-                barcval = [1.0]*n
+                barci, barcj, barcval = list(range(0,n)), list(range(0,n)), [1.0]*n 
 
                 # Constraints RHS
                 blc = self._b
                 buc = blc
 
                 # Constraints LHS
-                barai = []
-                baraj = []
-                baraval = []
+                barai, baraj, baraval = [], [], [] 
                 
                 for k in range(m):
                     barai.append(self._A_sparse[0][k])
@@ -77,7 +72,6 @@ class _InitialPoint:
                     task.putbaraij(k, 0, [syma], [1.0])  
 
                 # Input the objective sense (minimize/maximize)
-                
                 task.putobjsense(mosek.objsense.minimize)
 
                 # Solve the problem and print summary
@@ -117,6 +111,7 @@ class _InitialPoint:
     def _get_initial_point(self):
 
         self._get_SDP_solution(self._X0, self._lam0)
+        
         # The eigenvalues in descending order
         eig_dec = np.linalg.eigh(self._X0)
         eig_vals_X = np.flip(eig_dec[0]) 
@@ -125,8 +120,4 @@ class _InitialPoint:
         for i in range(self._rank):
             self._Y0[:,i] = eig_vecs_X[:,i] * np.sqrt(eig_vals_X[i])
 
-
-        print(self._X0)
-        print(self._Y0)
-        print(self._lam0) 
         return self._Y0, self._lam0 

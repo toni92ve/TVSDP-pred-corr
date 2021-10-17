@@ -2,6 +2,10 @@ import pickle
 import numpy as np 
 import os
 
+np.set_printoptions(edgeitems=30, linewidth=100000
+    # ,formatter=dict(float=lambda x: "%.5g" % x)
+    )
+    
 def visualize_sol(params):
 
     t = float(params["problem"]["initial_time"])

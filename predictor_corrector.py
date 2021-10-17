@@ -1,44 +1,7 @@
-from operator import matmul
-from cvxpy.reductions import reduction 
-from numpy.core.fromnumeric import size
-import osqp
 import time
 import pickle
 import numpy as np 
-import cvxpy as cp
-import cvxpy.error as cp_error
-import scipy  
-from parameters import getParameters
-
-from scipy import sparse
-from scipy.linalg import null_space 
-from scipy.linalg import svd
-import remove_red as rr
-import os
-import glob
-
-np.set_printoptions(edgeitems=30, linewidth=100000
-    # ,formatter=dict(float=lambda x: "%.5g" % x)
-    )
- 
-
-def _getInterpolatedMatrix(A1: np.ndarray, A2: np.ndarray,
-                           t: float, out: np.ndarray) -> np.ndarray:
-    """
-    Returns data matrix linearly interpolated between two timestamps t and t+1:
-    out = A1 + t * (A2 - A1)
-    """
-    assert isinstance(A1, np.ndarray) and isinstance(A2, np.ndarray)
-    assert isinstance(out, np.ndarray) 
-    assert A1.shape == A2.shape == out.shape
-    # assert 0.0 <= t <= 1.0
-
-    np.copyto(out, A2)
-    out -= A1
-    out *= t
-    out += A1
-
-    return out
+import remove_redundancy as rr 
 
 def _getYY(Y: np.ndarray, out: np.ndarray) -> np.ndarray:
     """
@@ -98,9 +61,7 @@ class _AccuracyCriterion:
     def __init__(self, n: int, m: int, rank: int):
         """
         Constructor pre-allocates caches for the temporary variables.
-        """
-        assert isinstance(n, int)
-        assert isinstance(rank, int) and 0 < rank <= n
+        """ 
 
         self._grad_AYY = np.full((m, n*rank), fill_value=0.0)
         self._YY = np.full((n, n), fill_value=0.0)
@@ -141,9 +102,7 @@ class _LinearTerm:
     def __init__(self, n: int, m: int, rank: int):
         """
         Constructor pre-allocates caches for the temporary variables.
-        """
-        assert isinstance(n, int)
-        assert isinstance(rank, int) and 0 < rank <= n
+        """ 
 
         self.n = n
         self.rank = rank
@@ -157,9 +116,7 @@ class _LinearTerm:
                 Y: np.ndarray, lam: np.ndarray, penalty: np.float) -> np.ndarray:
         """
         Computes the linear term of objective function in QP problem.
-        """
-        assert A1.shape == A2.shape 
-        assert Y.ravel().shape == self._q.shape
+        """ 
 
         np.copyto(self._diffA, A2)
         self._diffA -= A1                       # diffA = A2 - A1
@@ -171,19 +128,14 @@ class _LinearTerm:
  
 class _QuadraticTerm:
 
-    def __init__(self, n: int, rank: int):
-
-        assert isinstance(n, int)
-        assert isinstance(rank, int) and 0 < rank <= n
+    def __init__(self, n: int, rank: int): 
 
         self._n = n
         self._rank = rank
         self._nvars = n*rank 
 
     def compute(self, A: np.ndarray, lam: np.ndarray, penalty: np.float) -> np.ndarray:
-        """
-        Assembles a sparse, quadratic term matrix given current state.
-        """  
+        
         n = self._n
         rank = self._rank
         nvars = n*rank
@@ -211,9 +163,7 @@ class _Constraints:
         """
         Constructor pre-allocates and pre-computes persistent data structures.
         For more readable formulation see the file: test_constraints.py.
-        """
-        assert isinstance(n, int) and isinstance(m, int)
-        assert isinstance(rank, int) and 0 < rank <= n
+        """ 
 
         self._n = n
         self._m = m
@@ -232,9 +182,7 @@ class _Constraints:
                  Y: np.ndarray):
          
         n, m, rank = self._n, self._m, self._rank
-
-        # ASSERTIONS 
-
+ 
         _getYY(Y=Y, out=self._YY)
  
         for i in range(m):
@@ -294,17 +242,13 @@ class _PredictorCorrector:
 
     def run(self, A0: np.ndarray, A_lin: np.ndarray, 
                   b0: np.ndarray, b_lin: np.ndarray,
-                  Y_0: np.ndarray, lam_0: np.ndarray):
-        """ Runs the inner loop of predictor-corrector algorithm between
-            timestamps t and t+1. """ 
+                  Y_0: np.ndarray, lam_0: np.ndarray): 
 
         # Get copies of all problem parameters.  
         final_time = self._final_time 
         initial_time = self._initial_time
 
-        n = self._n
-        m = self._m
-        rank = self._rank
+        n, m, rank = self._n,  self._m, self._rank
 
         gamma1 = self._gamma1
         gamma2 = self._gamma2 
@@ -331,8 +275,6 @@ class _PredictorCorrector:
 
         while curr_time < final_time: 
 
-            
-             
             np.copyto(self._currA, A0 + A_lin*curr_time)
             np.copyto(self._nextA, A0 + A_lin*next_time)
             np.copyto(self._currb, b0 + b_lin*curr_time) 
@@ -390,39 +332,9 @@ class _PredictorCorrector:
                 dt = min(final_time - curr_time, gamma2 * dt)
                 next_time = curr_time+dt
                  
-def _SolveQP(n: int, m:int, rank: int, P: np.ndarray, q: np.ndarray,
-             C: sparse.csc_matrix, d: np.ndarray, 
-             dY: np.ndarray, lam: np.ndarray):
-    """ Solves QP problem using CVXPY library. """
-     
-    # Define and solve the CVXPY problem.
-    x = cp.Variable(n*rank ) 
-
-    start_time = time.time() 
-    objective = cp.Minimize((1/2)*cp.quad_form(x, P) + q.T @ x)
-     
-    prob = cp.Problem(objective, [C @ x == d])
-    prob.solve(solver=cp.SCS, use_indirect=False)
-    # try:
-    #     res = prob.solve(solver=cp.SCS, use_indirect=False)
-    # except cp_error.DCPError:
-    #     objective = cp.Minimize((1/2)*cp.quad_form(x, P+0.001*cp.diag([1.0]*n*rank)) + q.T @ x)
-    #     prob = cp.Problem(objective, [C @ x == d])
-    #     res = prob.solve(solver=cp.SCS, use_indirect=False)
-    
-    run_time = time.time() - start_time
-
-    # Check status of the solver.
-    ok = True 
-
-    # Get solution for Y's increment and dual variables. 
-    np.copyto(dY, x.value.reshape(n, rank))  
-    np.copyto(lam,prob.constraints[0].dual_value) 
-     
-    return ok, run_time
 
 def _SolveQP_NSpace(n: int, m:int, rank: int, P: np.ndarray, q: np.ndarray,
-                    C: sparse.csc_matrix, d: np.ndarray, Y_0: np.ndarray,
+                    C: np.ndarray, d: np.ndarray, Y_0: np.ndarray,
                     dY: np.ndarray, lam: np.ndarray): 
     
     start_time = time.time() 
