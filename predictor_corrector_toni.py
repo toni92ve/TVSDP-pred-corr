@@ -1,12 +1,15 @@
 from operator import matmul
+from cvxpy.reductions import reduction 
 from numpy.core.fromnumeric import size
 import osqp
 import time
 import pickle
 import numpy as np 
 import cvxpy as cp
-from cvxpy import solvers
+import cvxpy.error as cp_error
+import scipy  
 from parameters_toni import getParameters
+
 from scipy import sparse
 from scipy.linalg import null_space 
 from scipy.linalg import svd
@@ -47,19 +50,19 @@ _FATAL_STATUSES = {
 }
 
 def _getInterpolatedMatrix(A1: np.ndarray, A2: np.ndarray,
-                           tau: float, out: np.ndarray) -> np.ndarray:
+                           t: float, out: np.ndarray) -> np.ndarray:
     """
     Returns data matrix linearly interpolated between two timestamps t and t+1:
-    out = A1 + tau * (A2 - A1)
+    out = A1 + t * (A2 - A1)
     """
     assert isinstance(A1, np.ndarray) and isinstance(A2, np.ndarray)
     assert isinstance(out, np.ndarray) 
     assert A1.shape == A2.shape == out.shape
-    # assert 0.0 <= tau <= 1.0
+    # assert 0.0 <= t <= 1.0
 
     np.copyto(out, A2)
     out -= A1
-    out *= tau
+    out *= t
     out += A1
 
     return out
@@ -98,7 +101,7 @@ def _getGradientAYY(n: int, m:int, rank: int, A:np.ndarray, Y: np.ndarray, out: 
     for cons_nr in range(m):
         for i in range(n):
             for j in range(rank):   
-                out[cons_nr, i*rank+j] = 2 * np.dot(A[cons_nr,i,:],Y[:,j])
+                out[cons_nr, i*rank+j] = 2 * np.dot(A[cons_nr,i,:],Y[:,j]) 
     return out
 
 def _getLamTimesA(lam: np.ndarray, A: np.ndarray, out: np.ndarray) -> np.ndarray:
@@ -107,14 +110,13 @@ def _getLamTimesA(lam: np.ndarray, A: np.ndarray, out: np.ndarray) -> np.ndarray
         out +=  lam[i] * A[i,:,:] 
     return out
 
-def _getLinear(Y: np.ndarray, gradYY: np.ndarray, lamTimesA: np.ndarray,
+def _getLinear(n: np.int, rank: np.int, Y: np.ndarray, gradYY: np.ndarray, lamTimesA: np.ndarray, penalty: np.float,
                 out: np.ndarray) -> np.ndarray:
 
-    # SOME ASSERTIONS  
-   
-    np.matmul(gradYY, lamTimesA, out=out)
-    out += Y.ravel()
-    out += Y.ravel()
+    np.matmul(gradYY, lamTimesA, out=out) 
+    for i in range(n):
+        for j in range(rank):
+                out[j+i*rank] += 2 * (1+(j+1)*penalty/rank)* Y[i,j]
 
     return out
 
@@ -130,34 +132,35 @@ class _AccuracyCriterion:
         self._grad_AYY = np.full((m, n*rank), fill_value=0.0)
         self._YY = np.full((n, n), fill_value=0.0)
         self.constr_err = np.full((m, ), fill_value=0.0)
-        # self._tmp3 = np.full((T, N), fill_value=0.0)
+        self.lagran_grad = np.zeros((n*rank,))
 
     def residual(self, n: int, m:int, rank:int, b: np.ndarray, A: np.ndarray, Y: np.ndarray,
-                 lam: np.ndarray) -> float:
+                 lam: np.ndarray, penalty: np.float) -> float:
         """
         Computes the residual.
         """
-        # ASSERTIONS
-
-        # Compute residual A.
-        _getGradientAYY(n, m, rank, A, Y, self._grad_AYY) 
-        res = Y.ravel() 
-        # print("residual")
-        # print(res)
-        res += Y.ravel()
-        # print(res)
-        res += np.matmul(lam, self._grad_AYY)
-        # print(res)
-        resA = np.linalg.norm(res.ravel(), np.inf)
-        
-        # Compute residual B.
+        # print("Inside the residual: ")
+        # Compute Lagrangian residual
+        # print(Y, lam, A, b)
+        _getGradientAYY(n, m, rank, A, Y, self._grad_AYY)  
+        # print("self._grad_AYY\n", self._grad_AYY)
+        # print("times lam", np.matmul(lam, self._grad_AYY))
+        # print(self.lagran_grad.ravel())
+        for i in range(n):
+            for j in range(rank):
+                self.lagran_grad[j+i*rank] += 2 * (1+(j+1)*penalty/rank)* Y[i,j]
+        # print(self.lagran_grad.ravel())
+        self.lagran_grad += np.matmul(lam, self._grad_AYY) 
+        # print(self.lagran_grad.ravel())
+        resA = np.linalg.norm(self.lagran_grad.ravel(), np.inf)
+        # print("resA",resA)
+        # Compute constraints residual
         _getYY(Y=Y, out=self._YY)
-        self.constr_err = -b
-        for i in range(m):  
-            self.constr_err[i] += np.dot(self._YY.ravel(), A[i,:,:].ravel()) 
-                            
-        res = np.minimum(lam, self.constr_err) 
-        resB = np.linalg.norm(res.ravel(), np.inf) 
+        np.copyto(self.constr_err, -b)
+        for i in range(m):   
+            self.constr_err[i] += np.dot(self._YY.ravel(), A[i,:,:].ravel())  
+        resB = np.linalg.norm(self.constr_err, np.inf)
+        # print("resB",resB)
         return max(resA, resB)
 
 class _LinearTerm:
@@ -178,12 +181,11 @@ class _LinearTerm:
         self._q = np.full((n*rank,), fill_value=0.0)
 
     def compute(self, A1: np.ndarray, A2: np.ndarray, 
-                Y: np.ndarray, lam: np.ndarray) -> np.ndarray:
+                Y: np.ndarray, lam: np.ndarray, penalty: np.float) -> np.ndarray:
         """
         Computes the linear term of objective function in QP problem.
         """
-        assert A1.shape == A2.shape
-        # assert M1.shape == self._M_LmM.shape == self._diffM.shape
+        assert A1.shape == A2.shape 
         assert Y.ravel().shape == self._q.shape
 
         np.copyto(self._diffA, A2)
@@ -191,7 +193,7 @@ class _LinearTerm:
         
         _getLamTimesA(lam=lam, A=self._diffA, out=self._lamTimesA)
         _getGradientYY(n=self.n, rank=self.rank, Y=Y, out=self._gradYY)
-        _getLinear(Y=Y, gradYY=self._gradYY.T ,lamTimesA=self._lamTimesA.ravel(), out=self._q)
+        _getLinear(n=self.n, rank=self.rank,Y=Y, gradYY=self._gradYY.T ,lamTimesA=self._lamTimesA.ravel(), penalty = penalty, out=self._q)
         return self._q.ravel()
  
 class _QuadraticTerm:
@@ -200,13 +202,12 @@ class _QuadraticTerm:
 
         assert isinstance(n, int)
         assert isinstance(rank, int) and 0 < rank <= n
-        
 
         self._n = n
         self._rank = rank
         self._nvars = n*rank 
 
-    def compute(self, A: np.ndarray, lam: np.ndarray) -> np.ndarray:
+    def compute(self, A: np.ndarray, lam: np.ndarray, penalty: np.float) -> np.ndarray:
         """
         Assembles a sparse, quadratic term matrix given current state.
         """  
@@ -227,6 +228,7 @@ class _QuadraticTerm:
                     _P[alpha,beta] += 2*_sum_lam_A[i,h]
                     if i == h:
                         _P[alpha,beta] += 2
+                        _P[alpha,beta] += 2*penalty*(j+1)/rank
          
         return _P
 
@@ -254,7 +256,7 @@ class _Constraints:
     def compute(self,
                  A1: np.ndarray, A2: np.ndarray,
                  b: np.ndarray,
-                 Y: np.ndarray, lam: np.ndarray) -> (np.ndarray, np.ndarray):
+                 Y: np.ndarray) -> (np.ndarray, np.ndarray):
          
         n, m, rank = self._n, self._m, self._rank
 
@@ -265,12 +267,12 @@ class _Constraints:
         for i in range(m):
             self._d[i] = b[i]
             self._d[i] -= np.dot(self._YY.ravel(), A2[i,:,:].ravel())
- 
+         
         for cons_nr in range(m):
                 for i in range(n):
                     for j in range(rank):  
                         self._C[cons_nr, i*rank+j] = 2 * np.dot(A1[cons_nr,i,:],Y[:,j])
-          
+                         
         return self._C, self._d
 
 class PredictorCorrector:
@@ -297,9 +299,12 @@ class PredictorCorrector:
         self._currA = np.zeros((m,n,n))
         self._nextA = np.zeros((m,n,n))
         self._Y = np.zeros((n, rank))
-        self._dY = np.zeros((n, rank))
+        # self._dY = np.zeros((n, rank))
         self._lam = np.zeros((m, )) 
-        self._d_lam = np.zeros((m, )) 
+        # self._d_lam = np.zeros((m, ))  
+        self._candidate_Y = np.zeros((n, rank))
+        self._candidate_lam = np.zeros((m, )) 
+        self._solution_X = np.zeros((n, n))
 
         # Parameters. Note, 'delta' can change over time, but 'base_delta'
         # remains the same. The latter defines the minimum value for the
@@ -313,130 +318,168 @@ class PredictorCorrector:
         self._eta1 = float(params["problem"]["eta1"])
         self._eta2 = float(params["problem"]["eta2"])
         self._gamma1 = float(params["problem"]["gamma1"])
-        self._gamma2 = 1.0 / self._gamma1
+        self._gamma2 = float(params["problem"]["gamma2"])
         self._max_retry_attempts = float(params["problem"]["max_retry_attempts"])
         self._res_tol = float(params["problem"]["res_tol"])
-        self._min_delta_tau = float(params["problem"]["min_delta_tau"])
+        self._pen_coef = float(params["problem"]["pen_coef"])
+        self._min_delta_t = float(params["problem"]["min_delta_t"])
         self._ini_stepsize = float(params["problem"]["ini_stepsize"])
         self._final_time = float(params["problem"]["final_time"])
+        self._initial_time = float(params["problem"]["initial_time"])
         self._verbose = int(params["verbose"])
 
-    def run(self, b1: np.ndarray, b2: np.ndarray,
-                  A1: np.ndarray, A2: np.ndarray,
+    def run(self, A0: np.ndarray, A_lin: np.ndarray, 
+                  b0: np.ndarray, b_lin: np.ndarray,
                   Y_0: np.ndarray, lam_0: np.ndarray):
         """ Runs the inner loop of predictor-corrector algorithm between
             timestamps t and t+1. """ 
 
         # Get copies of all problem parameters.  
         final_time = self._final_time 
+        initial_time = self._initial_time
+
         n = self._n
         m = self._m
         rank = self._rank
 
         gamma1 = self._gamma1
-        gamma2 = self._gamma2
-        max_retry_attempts = self._max_retry_attempts
+        gamma2 = self._gamma2 
         res_tol = self._res_tol
-        min_delta_tau = self._min_delta_tau
-        dtau = self._ini_stepsize 
-        verbose = self._verbose
-        # assert 0 < min_delta_tau <= dtau <= 1.0 
+        pen_coef = self._pen_coef
+        min_delta_t = self._min_delta_t
+        dt = self._ini_stepsize  
+        assert 0 < min_delta_t <= dt <= 1.0 
 
         np.copyto(self._Y, Y_0)
         np.copyto(self._lam, lam_0) 
 
-        iteration = 0
-        tau = 0.0
-
-        # while dtau > np.sqrt(np.finfo(np.float64).eps).item():
-
-        # if verbose >= 1:
-        #     print("+" if attempt == 0 else "a", end="", flush=True)
-
+        iteration = 0 
+        reduction_steps = 0
+        
+        curr_time = initial_time
+        next_time = initial_time + dt
+          
+        res_0 = self._accuracy_crit.residual(n=n, m=m, rank=rank, b=b0, A=A0,
+                                            Y=self._Y, lam=self._lam, penalty=pen_coef )
         f = open(f"results/0.pkl", "wb")  
-        pickle.dump([Y_0,np.matmul(Y_0,Y_0.T),lam_0], f)
+        pickle.dump([Y_0,np.matmul(Y_0,Y_0.T),lam_0, res_0, 0.0, 0,0], f)
         f.close()
 
-        while tau < final_time:
+        while curr_time < final_time: 
 
-            _getInterpolatedMatrix(b1, b2, tau, self._currb)
-            _getInterpolatedMatrix(b1, b2, tau + dtau, self._nextb)
-            _getInterpolatedMatrix(A1, A2, tau, self._currA)
-            _getInterpolatedMatrix(A1, A2, tau + dtau, self._nextA) 
-
-            time = self._currb[0]/b1[0]
-
-            print("\n ITERATION NR:", iteration, "\n interpolation coefficient =", tau,"\n"
-            ,"time: ", time, "\n")
-            
-            print("current b term \n",  self._currb) 
-            # print("next b term \n",  self._nextb) 
-            print("current Y\n", self._Y)
-            print("current X\n", np.matmul(self._Y,self._Y.T))
-            print("current lam\n", self._lam)
+            print("ITERATION", iteration) 
+             
+            np.copyto(self._currA, A0 + A_lin*curr_time)
+            np.copyto(self._nextA, A0 + A_lin*next_time)
+            np.copyto(self._currb, b0 + b_lin*curr_time) 
+            np.copyto(self._nextb, b0 + b_lin*next_time)  
+             
+            # print("current b term \n",  self._currb)  
+            # print("current Y\n", self._Y)
+            # print("current X\n", np.matmul(self._Y,self._Y.T))
+            # print("current lam\n", self._lam)
 
             q = self._lin_term.compute(A1=self._currA, A2=self._nextA,
-                                    Y=self._Y, lam=self._lam)
+                                    Y=self._Y, lam=self._lam, penalty = pen_coef)
+            # print("q:\n",q)
+            P = self._quad_term.compute(A=self._currA, lam=self._lam, penalty = pen_coef)
+            grad_cons = np.zeros((m,n*rank))
+            _getGradientAYY(n, m, rank, self._currA, self._Y, grad_cons)  
              
-            P = self._quad_term.compute(A=self._currA, lam=self._lam)  
-
+            # print("P:\n",P)  
+             
+            # Z = scipy.linalg.null_space(grad_cons)
+            # ZPZ = np.matmul(Z.T,np.matmul(P,Z))
+            # print(np.linalg.eigh(ZPZ)[0])
             C, d = self._constraints.compute(
-                A1=self._currA, A2=self._nextA,
-                b=self._nextb, Y=self._Y, lam=self._lam) 
+                A1 = self._currA, A2=self._nextA,
+                b = self._nextb, Y=self._Y) 
+            # print("d:\n",d)
+            # print("C:\n",C)
+
+            success, run_time = _SolveQP_NSpace(n=n, m=m, rank=rank, P=P, q=q, C=C, d=d, Y_0=self._Y.ravel(),
+                         dY=self._candidate_Y, lam=self._candidate_lam )
             
-           
-            # print("P: \n", P)
-            # print("C: \n", C, np.linalg.matrix_rank(C))
-
-            print("\nSolving the QP with null space method... \n")
-
-            _SolveQP_NSpace(n=n, m=m, rank=rank, P=P, q=q, C=C, d=d, Y_0=self._Y.ravel(),
-                        dY=self._dY, lam=self._lam)
-            # _SolveQP(n=n, m=m, rank=rank, P=P, q=q, C=C, d=d,
-            #             dY=self._dY, lam=self._d_lam)
+            # success, run_time = _SolveQP(n=n, m=m, rank=rank, P=P, q=q, C=C, d=d,
+            #     dY=self._candidate_Y, lam=self._candidate_lam)
+             
+            if success: print("QP solved! \n")  
+            self._candidate_Y += self._Y
+             
+            res = self._accuracy_crit.residual(n=n, m=m, rank=rank, b=self._nextb, A=self._nextA,
+                                            Y=self._candidate_Y, lam=self._candidate_lam, penalty=pen_coef)
             
-            # print("primal step:\n", self._dY)   
-            # print("lambda step: \n", self._lam)
-            # print("my calculations:", .5 + (tau+dtau)/2)
+            if res>res_tol: 
+                dt *= gamma1
+                next_time = curr_time + dt 
+                reduction_steps += 1 
+                 
+            else:
 
-            self._dY += self._Y             # dY <-- Y + dY
-            Y_new = self._dY                # alias to Y + dY
-            X_new = np.matmul(Y_new,Y_new.T) 
+                # Update the solution.
+                np.copyto(self._Y, self._candidate_Y)
+                np.copyto(self._lam, self._candidate_lam) 
+                np.copyto(self._solution_X,np.matmul(self._Y,self._Y.T))
 
-            # self._d_lam += self._lam            # d_lam <-- lam + d_lam
-            # lam_new = self._d_lam               # alias to lam + d_lam
+                f = open(f"results/{iteration+1}.pkl", "wb")  
+                 
+                pickle.dump([self._Y,self._solution_X,self._lam,res,dt,run_time,reduction_steps], f)
+                f.close() 
  
-            # res = self._accuracy_crit.residual(b=self._nextb, A=self._nextA,
-                                            # Y=Y_new, lam=lam_new)
+                # Go to the next iteration. Try to shrink 'delta' a little bit.
+                curr_time += dt
+                iteration += 1
+                reduction_steps = 0
+                dt = min(final_time - curr_time, gamma2 * dt)
+                next_time = curr_time+dt
+                 
+def _SolveQP(n: int, m:int, rank: int, P: np.ndarray, q: np.ndarray,
+             C: sparse.csc_matrix, d: np.ndarray, 
+             dY: np.ndarray, lam: np.ndarray) -> (bool, float):
+    """ Solves QP problem using CVXPY library. """
+     
+    # Define and solve the CVXPY problem.
+    x = cp.Variable(n*rank ) 
 
-            f = open(f"results/{iteration+1}.pkl", "wb")  
-            pickle.dump([Y_new,X_new,self._lam], f)
-            f.close() 
+    start_time = time.time() 
+    objective = cp.Minimize((1/2)*cp.quad_form(x, P) + q.T @ x)
+     
+    prob = cp.Problem(objective, [C @ x == d])
+    prob.solve(solver=cp.SCS, use_indirect=False)
+    # try:
+    #     res = prob.solve(solver=cp.SCS, use_indirect=False)
+    # except cp_error.DCPError:
+    #     objective = cp.Minimize((1/2)*cp.quad_form(x, P+0.001*cp.diag([1.0]*n*rank)) + q.T @ x)
+    #     prob = cp.Problem(objective, [C @ x == d])
+    #     res = prob.solve(solver=cp.SCS, use_indirect=False)
+    
+    run_time = time.time() - start_time
 
-            # Update the solution.
-            np.copyto(self._Y, Y_new)
-            # np.copyto(self._lam, lam_new) 
-            # np.copyto(self._lam, solution[0]) 
+    # Check status of the solver.
+    ok = True 
 
-            # Go to the next iteration. Try to shrink 'delta' a little bit.
-            tau += dtau
-            iteration += 1
-            #dtau = min(final_time - tau, gamma2 * dtau)
+    # Get solution for Y's increment and dual variables. 
+    np.copyto(dY, x.value.reshape(n, rank))  
+    np.copyto(lam,prob.constraints[0].dual_value) 
+     
+    return ok, run_time
 
 def _SolveQP_NSpace(n: int, m:int, rank: int, P: np.ndarray, q: np.ndarray,
                     C: sparse.csc_matrix, d: np.ndarray, Y_0: np.ndarray,
-                    dY: np.ndarray, lam: np.ndarray) -> bool: 
+                    dY: np.ndarray, lam: np.ndarray) -> (bool,float): 
     
+    start_time = time.time() 
+
     "check for redunt constraints" 
     constr_reduction = False
-    print(m, np.linalg.matrix_rank(C))
+     
     if m > np.linalg.matrix_rank(C):
         
         print("Reducing constraints...")
         constr_reduction = True
         rem_red = rr._remove_redundancy_svd(C,d) 
-        clean_C = rem_red[0]
-        clean_d = rem_red[1]
+        clean_C = rem_red[0] 
+        clean_d = rem_red[1] 
         clean_m = np.shape(clean_C)[0]
 
         redund_cons_index = [] 
@@ -453,111 +496,50 @@ def _SolveQP_NSpace(n: int, m:int, rank: int, P: np.ndarray, q: np.ndarray,
         C = clean_C
         d = clean_d
         m = clean_m
-    
+   
     "finding the null space and its completion"
-
     Q = np.linalg.qr(C.T,'complete')[0]
     W = Q[:,:m]
-    Z = Q[:,m:]  
-     
+    Z = Q[:,m:]     
+
     C_W = np.matmul(C, W)
-    
-    print("W: \n", W)
-    print("C: \n", C)
-    print("clean_C: \n", clean_C)
-    print("C_W: \n", C_W)
     h = d - np.matmul(C,Y_0)
-    
     g = q + np.matmul(P,Y_0)
     Y_W = np.linalg.solve(C_W, h) 
-    # print("Y_W: \n", Y_W)
-
-    "Solve system for Y_Z"
-    Z_trans_P = np.matmul(Z.T,P)
-    # print("Z^TP=\n", Z_trans_P)
-    Z_trans_P_Z = np.matmul(Z_trans_P,Z)
-    # print("Z^TPZ=\n",Z_trans_P_Z)
-    Z_trans_P_W = np.matmul(Z_trans_P,W) 
-    # print("Z^TPW=\n",Z_trans_P_W)
+     
+    "Solve system for Y_Z" 
+    Z_trans_P = np.matmul(Z.T,P) 
+    Z_trans_P_Z = np.matmul(Z_trans_P,Z)  
+    Z_trans_P_W = np.matmul(Z_trans_P,W)  
     r_term_1 = -np.matmul(Z_trans_P_W,Y_W)
     r_term_2 = -np.matmul(Z.T,g)
     r_term = r_term_1+r_term_2
+     
     Y_Z = np.linalg.solve(Z_trans_P_Z,r_term)
-    # print("Y_Z: \n", Y_Z)
 
     "Get the Y step"
     Y_sol_ns = np.matmul(W,Y_W) + np.matmul(Z,Y_Z)
-    # print("Y_sol_ns", Y_sol_ns)
-    
     Y_step = Y_sol_ns + Y_0 
     np.copyto(dY, Y_step.reshape((n,rank)))
     
     "Get the lambda step"
     r_term_3 = g+np.matmul(P,Y_sol_ns)
     r_term_4 = np.matmul(W.T,r_term_3) 
-    # print("r_term_3 :\n",r_term_3)
-    # print("r_term_4 :\n",r_term_4)
-    # print("g: \n", g)
-    # print("g+Py: \n", r_term_3)
-    
-    new_lambda = np.linalg.solve(C_W.T, r_term_4)  
+    new_lambda = np.linalg.solve(-C_W.T, r_term_4)  
     
     "Add 0 as multiplier for the redundant constraints"
     if constr_reduction == True:
         for j in redund_cons_index:
             new_lambda = np.insert(new_lambda,j,0) 
 
-    # print("new_lam: \n",new_lambda)
     np.copyto(lam, new_lambda)
 
-    return True
-    
-def _SolveQP(n: int, m:int, rank: int, P: np.ndarray, q: np.ndarray,
-             C: sparse.csc_matrix, d: np.ndarray, 
-             dY: np.ndarray, lam: np.ndarray) -> bool:
-    """ Solves QP problem using CVXPY library. """
-    # ASSERTIONS 
- 
-
-    # Create an CVXPY object, setup workspace and solve the problem. 
-  
-
-    # Define and solve the CVXPY problem.
-    x = cp.Variable(n*rank)
-
-    start_time = time.time()
-    objective = cp.Minimize((1/2)*cp.quad_form(x, P) + q.T @ x)
-     
-    prob = cp.Problem(objective, [C @ x == d])
-    res = prob.solve(solver=cp.SCS, use_indirect=False)
     run_time = time.time() - start_time
 
-    # Check status of the solver.
-    ok = True
-    # assert isinstance(res.info.status, str)
-    # if res.info.status in _ACCEPTABLE_STATUSES:
-    #     print("QP problem status:", res.info.status)
-    #     print("#iter: {:d}, obj_val: {:f}, pri_res: {:f}, dua_res: {:f}, "
-    #           "run_time: {:f}".format(res.info.iter, res.info.obj_val,
-    #                                   res.info.pri_res, res.info.dua_res,
-    #                                   run_time))
-    # elif res.info.status in _FATAL_STATUSES:
-    #     raise RuntimeError("QP solver fatally failed with status: {:s}"
-    #                        .format(res.info.status))
-    # else:
-    #     print("WARNING: QP solver failed with status: {:s}"
-    #           .format(res.info.status))
-    #     ok = False
-
-    # Get solution for Y's increment and dual variables.
+    return True , run_time
     
-    if ok:    
-        np.copyto(dY, x.value.reshape(n, rank))
-        print("constr:", prob.constraints[0].dual_value)
-        # for i in range(m):
-        #     lam[i] = prob.constraints[i].dual_value 
 
-    return ok
 
 
  
+

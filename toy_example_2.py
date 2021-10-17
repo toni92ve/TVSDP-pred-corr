@@ -2,6 +2,7 @@ import pickle
 import numpy as np
 import predictor_corrector_toni as pc 
 from parameters_toni import getParameters
+from visualize import visualize_sol
 
 n = 4
 m = 6
@@ -33,8 +34,8 @@ A6 = [[0,0,0,0],
       [0,0,1,0]]      
 
 A = np.array([A1,A2,A3,A4,A5,A6], dtype=np.float64)
-b0 = np.array([2., 2., 2., 2., 2., 2.])
-bf = np.array([4., 4., 4., 4., 4., 4.])        
+b = np.array([2., 2., 2., 2., 2., 2.])
+ 
 
 y = 1/np.sqrt(2)
 # Y_0 = np.array([[y,y],[y,y],[y,y],[y,y]], dtype=np.float64)
@@ -47,4 +48,6 @@ lam_0 = np.array([l,l,l,l,l,l])
  
 predcorr = pc.PredictorCorrector(n=n, m=m, rank=rank, params=getParameters(print_par=False))
 
-predcorr.run(b0, bf, A, A, Y_0, lam_0) 
+predcorr.run(b, A, Y_0, lam_0)   
+ 
+visualize_sol(params=getParameters(print_par=False))

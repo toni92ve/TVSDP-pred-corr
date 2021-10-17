@@ -1,47 +1,40 @@
-import pickle
 import numpy as np
 import predictor_corrector_toni as pc 
 from parameters_toni import getParameters
+from visualize import visualize_sol
+
+params=getParameters(print_par=False)
 
 n = 3
 m = 3
 rank = 2
 
-lt = pc._LinearTerm(n=n, m=m, rank=rank)
-qt = pc._QuadraticTerm(n=n, rank=rank)
-cs = pc._Constraints(n=n, m=m, rank=rank)
+A1 = [[1,1,0],
+      [1,0,0],
+      [0,0,0]]
+A2 = [[0,0,1],
+      [0,0,0],
+      [1,0,0]]
+A3 = [[0,0,0],
+      [0,0,1],
+      [0,1,1]]
+A0 = np.array([A1,A2,A3], dtype=np.float64)
+Z = np.zeros((3,3))
+A_lin = np.array([Z,Z,Z], dtype=np.float64)
 
-A1 = [[1,0,0],[0,0,0],[0,0,0]]
-A2 = [[0,0,1],[0,0,0],[1,0,0]]
-A3 = [[0,0,0],[0,0,1],[0,1,0]]
-A = np.array([A1,A2,A3], dtype=np.float64)
-b0 = np.array([1., 1., 1.])
-b1 = np.array([1.05, 1.05, 1.])
-bf = np.array([2., 2., 1.])        
-
-Y_0 = np.array([[1,0],[.5,.5],[.5,.5]], dtype=np.float64)
-Y_1 = np.array([[1.02476394, 0.01558481],
-                 [0.5108176,  0.49216977],
-                 [0.50468668, 0.4921699 ]])
-
-y_0 = Y_0.ravel()
-constant_term = 2*y_0
-
-out = np.ndarray((n*rank,m),dtype=np.float64)
-for cons_nr in range(m):
-    for h in range(n):
-        for k in range(rank):  
-            out[h*rank+k, cons_nr] = 2 * np.dot(A[cons_nr,h,:],Y_0[:,k])
-
-solution=np.linalg.lstsq(out,constant_term,rcond=None)
-print(solution[0])
-# lam_0 = solution[0]
-lam_0 = [1.,0.,1.]
-# lam_1 = [-1.01080577, -0.01540662, -0.99217523]
-lam_1 = [1.00312006,  0.00624413 ,1.00327856]  # OBTAINED BY LEAST SQUARES
+b0 = np.array([1., 1., 1.])  
+b_lin = np.array([1., 1., 1.])  
+ 
+x = 1/np.sqrt(2)
+y = 1/np.sqrt(8)
+Y_0 = np.array([[x,0],[y,0],[x,0]], dtype=np.float64)
+pen_coef = float(params["problem"]["pen_coef"])
+eta = 1. + pen_coef/2
+lam_x = -0.25*eta
+lam_y = -0.625*eta
+lam_0 = np.array([lam_x,lam_y,lam_x]) 
+ 
 predcorr = pc.PredictorCorrector(n=n, m=m, rank=rank, params=getParameters(print_par=False))
  
-
-predcorr.run(b0, bf, A, A, Y_0, lam_0)
-# predcorr.run(b1, bf, A, A, Y_1, lam_1)
-
+predcorr.run(A0, A_lin, b0, b_lin, Y_0, lam_0)
+visualize_sol(params=getParameters(print_par=False))

@@ -75,13 +75,22 @@ _USER_PARAMETERS = {
         # increase factor - is obtained as a reciprocal: gamma2 = 1 / gamma1:
         "gamma1": 0.7,
 
-        # Residual tolerance:
-        "res_tol": 1e-4,
+        # gamma2
+        "gamma2": 1.3,
 
-        # Initial step size (delta tau) in the inner loop:
+        # Residual tolerance:
+        "res_tol":  1e-5,
+
+        # Penalization coefficient:
+        "pen_coef":   1e-5,
+
+        # Initial step size (delta t) in the inner loop:
         "ini_stepsize": .1,
 
-        # Initial step size (delta tau) in the inner loop:
+        # Initial time
+        "initial_time": 0.,
+
+        # Final time
         "final_time": 1.,
 
         # Tolerance in constraints definition:
@@ -93,8 +102,8 @@ _USER_PARAMETERS = {
         # Maximum number of delta expansions during one iteration:
         "max_delta_expansions": 5,
 
-        # The smallest admissible delta tau:
-        "min_delta_tau": 0.01,
+        # The smallest admissible delta t:
+        "min_delta_t": 1e-10,
 
         # Max. number of retrying attempts if residual is large in
         # predictor-corrector algorithm:
@@ -108,9 +117,7 @@ _USER_PARAMETERS = {
     # mybg is 1 or 2
     "debug":  dict({"mygen": True})
 
-
 }
-
 
 def _ParseCommandLineArgs():
     """

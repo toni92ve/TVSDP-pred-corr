@@ -25,19 +25,19 @@ A4 = [[0,0,0,0],
       [0,0,0,0]]   
 
 A = np.array([A1,A2,A3,A4], dtype=np.float64)
-b0 = np.array([2., 2., 2., 2.])
-bf = np.array([4., 4., 4., 4.])        
+b0 = np.array([0., 0., 0., 0.])
+bf = np.array([2., 2., 2., 2.])        
 
 Y_0 = np.array(
-     [[ 1.7755,   -0.5082],
-      [-1.9446,    1.3507],
-      [1.3183,    2.6382],
-      [-0.0247,   -2.0543]], 
+     [[ 1.7754,   -0.5091],
+      [-1.9442,    1.3520],
+      [1.3195,    2.6371],
+      [-0.0258,   -2.0540]], 
      dtype=np.float64)
  
-lam_0 = np.array([-8.3264,
-    7.7902,
-    7.2246,
+lam_0 = np.array([-8.3254,
+    7.7897,
+    7.2236,
     4.2793]) 
  
 predcorr = pc.PredictorCorrector(n=n, m=m, rank=rank, params=getParameters(print_par=False))
