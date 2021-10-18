@@ -1,7 +1,11 @@
-import time
-import pickle
-import numpy as np 
 import remove_redundancy as rr 
+import initial_point as ip
+import numpy as np 
+import pickle
+import time
+
+
+
 
 def _getYY(Y: np.ndarray, out: np.ndarray) -> np.ndarray:
     """
@@ -38,12 +42,6 @@ def _getGradientAYY(n: int, m:int, rank: int, A:np.ndarray, Y: np.ndarray, out: 
         for i in range(n):
             for j in range(rank):   
                 out[cons_nr, i*rank+j] = 2 * np.dot(A[cons_nr,i,:],Y[:,j]) 
-    return out
-
-def _getLamTimesA(lam: np.ndarray, A: np.ndarray, out: np.ndarray) -> np.ndarray:
-     
-    for i in range(lam.size): 
-        out +=  lam[i] * A[i,:,:] 
     return out
 
 def _getLinear(n: np.int, rank: np.int, Y: np.ndarray, gradYY: np.ndarray, lamTimesA: np.ndarray, penalty: np.float,
@@ -121,7 +119,7 @@ class _LinearTerm:
         np.copyto(self._diffA, A2)
         self._diffA -= A1                       # diffA = A2 - A1
         
-        _getLamTimesA(lam=lam, A=self._diffA, out=self._lamTimesA)
+        np.copyto(self._lamTimesA,np.tensordot(lam, self._diffA, 1))
         _getGradientYY(n=self.n, rank=self.rank, Y=Y, out=self._gradYY)
         _getLinear(n=self.n, rank=self.rank,Y=Y, gradYY=self._gradYY.T ,lamTimesA=self._lamTimesA.ravel(), penalty = penalty, out=self._q)
         return self._q.ravel()
@@ -142,8 +140,8 @@ class _QuadraticTerm:
         
         _P = np.full((self._nvars,self._nvars), fill_value=0.0)
 
-        _sum_lam_A = np.full((self._n,self._n), fill_value=0.0)
-        _getLamTimesA(lam, A, out=_sum_lam_A)
+        _sum_lam_A = np.full((self._n,self._n), fill_value=0.0) 
+        np.copyto(_sum_lam_A, np.tensordot(lam, A, 1))
 
         for alpha in range(nvars):
             for beta in range(nvars):
@@ -270,7 +268,7 @@ class _PredictorCorrector:
         res_0 = self._accuracy_crit.residual(n=n, m=m, rank=rank, b=b0, A=A0,
                                             Y=self._Y, lam=self._lam, penalty=pen_coef )
         f = open(f"results/0.pkl", "wb")  
-        pickle.dump([Y_0,np.matmul(Y_0,Y_0.T),lam_0, res_0, 0.0, 0,0], f)
+        pickle.dump([Y_0,np.matmul(Y_0,Y_0.T),None, lam_0, res_0, 0.0, 0, 0, 0.], f)
         f.close()
 
         while curr_time < final_time: 
@@ -299,14 +297,20 @@ class _PredictorCorrector:
              
             res = self._accuracy_crit.residual(n=n, m=m, rank=rank, b=self._nextb, A=self._nextA,
                                             Y=self._candidate_Y, lam=self._candidate_lam, penalty=pen_coef)
-            
-             # print("ITERATION", iteration) 
-            print("n =",n,"m =",m,"rank =",rank,)
-            print("current b term \n",  self._currb)  
-            print("candidate Y\n", self._candidate_Y)
-            print("current X\n", np.matmul(self._Y,self._Y.T))
-            print("current lam\n", self._lam)
-            print("res VS res_tol:",res, self._res_tol )
+            candidate_X = np.matmul(self._candidate_Y,self._candidate_Y.T)
+            actual_X, actual_lam = ip._get_SDP_solution(n, m, self._nextA, self._nextb)
+            frob_error = np.linalg.norm(actual_X-candidate_X, 'fro')
+
+            print("ITERATION", iteration) 
+             
+            # print("current b term \n",  self._currb)  
+            # print("candidate Y\n", self._candidate_Y)
+            # print("candidate X\n", candidate_X)
+            # print("actual X\n", actual_X)
+            # print("actual lam\n", actual_lam)
+            # print("current lam\n", self._lam)
+            # print("error in Fro norm", frob_error)
+            # print("res VS res_tol:",res, self._res_tol )
             # print("q:\n",q)
             # print("P:\n",P) 
             # print("d:\n",d)
@@ -325,7 +329,7 @@ class _PredictorCorrector:
                 np.copyto(self._solution_X,np.matmul(self._Y,self._Y.T))
 
                 f = open(f"results/{iteration+1}.pkl", "wb")  
-                pickle.dump([self._Y,self._solution_X,self._lam,res,dt,run_time,reduction_steps], f)
+                pickle.dump([self._Y,self._solution_X, actual_X,self._lam,res,dt,run_time,reduction_steps, frob_error], f)
                 f.close() 
  
                 # Go to the next iteration. Try to shrink 'delta' a little bit.
@@ -334,6 +338,7 @@ class _PredictorCorrector:
                 reduction_steps = 0
                 dt = min(final_time - curr_time, gamma2 * dt)
                 next_time = curr_time+dt
+        
                  
 
 def _SolveQP_NSpace(n: int, m:int, rank: int, P: np.ndarray, q: np.ndarray,
