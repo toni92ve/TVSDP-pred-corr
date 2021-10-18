@@ -206,7 +206,7 @@ class _PredictorCorrector:
         self._m = m
         self._rank = rank
 
-        # Create all necessary modules and pre-allocate the workspace.
+        # Create all necessary modules and pre-allocate the workspace
         self._accuracy_crit =_AccuracyCriterion(n=n, m=m, rank=rank)  
         self._lin_term = _LinearTerm(n=n, m=m, rank=rank)
         self._quad_term = _QuadraticTerm(n=n, rank=rank)
@@ -221,7 +221,7 @@ class _PredictorCorrector:
         self._candidate_lam = np.zeros((m, )) 
         self._solution_X = np.zeros((n, n))
 
-        # Parameters.  
+        # Parameters
         self._base_delta = float(params["problem"]["delta"])
         self._delta = self._base_delta
         self._delta_expand = float(params["problem"]["delta_expand"])
@@ -244,7 +244,7 @@ class _PredictorCorrector:
                   b0: np.ndarray, b_lin: np.ndarray,
                   Y_0: np.ndarray, lam_0: np.ndarray): 
 
-        # Get copies of all problem parameters.  
+        # Get copies of all problem parameters
         final_time = self._final_time 
         initial_time = self._initial_time
 
@@ -290,15 +290,6 @@ class _PredictorCorrector:
                 A1 = self._currA, A2=self._nextA,
                 b = self._nextb, Y=self._Y) 
 
-            # print("ITERATION", iteration) 
-            # print("current b term \n",  self._currb)  
-            # print("current Y\n", self._Y)
-            # print("current X\n", np.matmul(self._Y,self._Y.T))
-            # print("current lam\n", self._lam)
-            # print("q:\n",q)
-            # print("P:\n",P) 
-            # print("d:\n",d)
-            # print("C:\n",C)
 
             success, run_time = _SolveQP_NSpace(n=n, m=m, rank=rank, P=P, q=q, C=C, d=d, Y_0=self._Y.ravel(),
                          dY=self._candidate_Y, lam=self._candidate_lam )
@@ -309,6 +300,18 @@ class _PredictorCorrector:
             res = self._accuracy_crit.residual(n=n, m=m, rank=rank, b=self._nextb, A=self._nextA,
                                             Y=self._candidate_Y, lam=self._candidate_lam, penalty=pen_coef)
             
+             # print("ITERATION", iteration) 
+            print("n =",n,"m =",m,"rank =",rank,)
+            print("current b term \n",  self._currb)  
+            print("candidate Y\n", self._candidate_Y)
+            print("current X\n", np.matmul(self._Y,self._Y.T))
+            print("current lam\n", self._lam)
+            print("res VS res_tol:",res, self._res_tol )
+            # print("q:\n",q)
+            # print("P:\n",P) 
+            # print("d:\n",d)
+            # print("C:\n",C)
+
             if res>res_tol: 
                 dt *= gamma1
                 next_time = curr_time + dt 
@@ -316,7 +319,7 @@ class _PredictorCorrector:
                  
             else:
 
-                # Update the solution.
+                # Update the solution
                 np.copyto(self._Y, self._candidate_Y)
                 np.copyto(self._lam, self._candidate_lam) 
                 np.copyto(self._solution_X,np.matmul(self._Y,self._Y.T))

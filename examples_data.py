@@ -78,6 +78,24 @@ class _Examples:
 
             b = np.array([1., 0., 0., 1.])  
             b_lin = np.array([ 0., 0., 0., 1.])  
+        
+        if self._example_name == "example_rand":
+
+            n = 3
+            m = 2
+            rank = 2
+
+            rand_A0 = np.random.randint(2, size=(3, 3))
+            rand_A1 = np.random.randint(2, size=(3, 3))
+            A0 = rand_A0 + rand_A0.T
+            A1 = rand_A1 + rand_A1.T
+            Z = np.zeros((3,3))
+
+            A = np.array([A0,A1], dtype=np.float64)
+            A_lin = np.array([Z,Z], dtype=np.float64)
+
+            b = np.array([1., 1.])  
+            b_lin = np.array([1., 1.])  
 
         return n, m, rank, A, A_lin, b, b_lin 
 

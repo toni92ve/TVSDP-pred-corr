@@ -4,5 +4,9 @@
 			"path": "."
 		}
 	],
-	"settings": {}
+	"settings": {
+		"python.defaultInterpreterPath": "/Users/toni/miniconda3/bin/python3"
+
+	}
+	
 }

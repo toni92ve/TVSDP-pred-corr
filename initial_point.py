@@ -1,7 +1,7 @@
 import numpy as np  
 import scipy as sc
-import mosek
 import sys
+import mosek
 
 class _InitialPoint:
 
