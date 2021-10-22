@@ -7,38 +7,22 @@ All user parameters are listed here, plus some handy function(s).
 
 _USER_PARAMETERS = { 
 
-    "problem": {
-        "ini_solution": "BM",
-        # Balancing multiplier in the initial solution problem:
-        "kappa": 0.25,
-
-        # History size, i.e. the number of recent-most images in data matrix:
-        "T": int(50),
-
-        # Maximal rank of low-rank approximation X = Y * Y^T:
-        "rank": int(8),
-
-        # Tolerance for the residual in strongly active constraint definition:
-        "eta1": 1e-2,
-
-        # Minimal Lagrangian multiplier in strongly active constraint definition:
-        "eta2": 1e-2,
-
+    "problem": { 
         # gamma1 is the step decrease factor. Another related parameter - step
         # increase factor - is obtained as a reciprocal: gamma2 = 1 / gamma1:
-        "gamma1": 0.7,
+        "gamma1": 0.5,
 
         # gamma2
         "gamma2": 1.3,
 
         # Residual tolerance:
-        "res_tol":  1e-4,
+        "res_tol":  1e-6,
 
         # Penalization coefficient:
-        "pen_coef":   1e-9,
+        "pen_coef":   1e-4,
 
         # Initial step size (delta t) in the inner loop:
-        "ini_stepsize": .1,
+        "ini_stepsize": .001,
 
         # Initial time
         "initial_time": 0.,
