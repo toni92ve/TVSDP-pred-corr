@@ -74,7 +74,7 @@ def _SolveQP_NSpace(n: int, m:int, rank: int, P: np.ndarray, q: np.ndarray,
 
     run_time = time.time() - start_time
 
-    return True , run_time
+    return run_time
     
 
 

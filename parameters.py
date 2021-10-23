@@ -13,16 +13,16 @@ _USER_PARAMETERS = {
         "gamma1": 0.5,
 
         # gamma2
-        "gamma2": 1.3,
+        "gamma2": 1.5,
 
         # Residual tolerance:
-        "res_tol":  1e-6,
+        "res_tol":  1e-4,
 
         # Penalization coefficient:
         "pen_coef":   1e-4,
 
         # Initial step size (delta t) in the inner loop:
-        "ini_stepsize": .001,
+        "ini_stepsize": .01,
 
         # Initial time
         "initial_time": 0.,

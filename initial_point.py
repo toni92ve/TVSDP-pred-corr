@@ -1,7 +1,9 @@
 import numpy as np  
 import scipy as sc
-import sys
 import mosek
+import time
+import sys
+
 
 # Define a stream printer to grab output from MOSEK
 def _streamprinter(text):
@@ -22,6 +24,7 @@ def _get_SDP_solution(n: np.int, m: np.int, A: np.ndarray, b: np.ndarray):
 
     A_sparse = _sparsify(m, A)
      
+    start_time = time.time() 
     # Make mosek environment
     
     with mosek.Env() as env:
@@ -72,6 +75,8 @@ def _get_SDP_solution(n: np.int, m: np.int, A: np.ndarray, b: np.ndarray):
             prosta = task.getprosta(mosek.soltype.itr)
             solsta = task.getsolsta(mosek.soltype.itr)
 
+            run_time = time.time() - start_time
+
             if (solsta == mosek.solsta.optimal):
                 lenbarvar = n * (n + 1) / 2
                 barx = [0.] * int(lenbarvar)
@@ -87,7 +92,7 @@ def _get_SDP_solution(n: np.int, m: np.int, A: np.ndarray, b: np.ndarray):
                 for i in range(n):
                     X[i,i] *= .5
                 
-                return X, [i * -1 for i in y]
+                return run_time, X, [i * -1 for i in y]
                 
             elif (solsta == mosek.solsta.dual_infeas_cer or
                 solsta == mosek.solsta.prim_infeas_cer):
@@ -99,7 +104,8 @@ def _get_SDP_solution(n: np.int, m: np.int, A: np.ndarray, b: np.ndarray):
 
 def _get_initial_point(n: np.int, m: np.int, rank: np.int, A: np.ndarray, b: np.ndarray):
 
-    X0, lam0 = _get_SDP_solution(n=n, m=m, A=A, b=b)
+    run_time, X0, lam0 = _get_SDP_solution(n=n, m=m, A=A, b=b)
+
     
     # The eigenvalues in descending order
     eig_dec = np.linalg.eigh(X0)
@@ -117,6 +123,7 @@ def _get_initial_point(n: np.int, m: np.int, rank: np.int, A: np.ndarray, b: np.
     # print("2\n:",np.tensordot(self._lam0, self._A, 2))
     if np.all(np.linalg.eigvals(np.eye(n)+np.tensordot(lam0, A, 1)) > 0):
         print("OK")
+        
         return Y0, lam0 
             
         
